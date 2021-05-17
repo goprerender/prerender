@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+option go_package = ".;storage";
+option java_multiple_files = true;
+
+package storage;
+
+import "google/protobuf/timestamp.proto";
+
+// The storage service definition.
+service Storage {
+  // Sends a store request message
+  rpc Store (StoreRequest) returns (StoreReply) {}
+  // Get a request from storage
+  rpc Get (GetRequest) returns (GetReplay) {}
+  //
+  rpc Len(LenRequest) returns (LenReplay) {}
+}
+
+message Page {
+  // Hash of uri
+  string hash = 1;
+
+  bytes data = 2;
+
+  // Date and time to remind the storage
+  google.protobuf.Timestamp createdAt = 3;
+}
+
+// The request message containing body.
+message StoreRequest {
+
+  string api = 1;
+
+  // Page entity to add
+  Page page =2;
+}
+
+// The response message containing body
+message StoreReply {
+  string api = 1;
+}
+
+// The request message
+message GetRequest {
+  string hash = 1;
+}
+
+// Tre replay message
+message GetReplay {
+  bytes data = 1;
+  bool result = 2;
+}
+
+message LenRequest {}
+
+message LenReplay {
+  int32 length = 1;
+}
