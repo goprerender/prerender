@@ -3,18 +3,19 @@ package rstorage
 import (
 	"context"
 	"github.com/golang/protobuf/ptypes"
-	"log"
 	"prerender/internal/cachers"
 	"prerender/pkg/api/storage"
+	"prerender/pkg/log"
 	"time"
 )
 
 type server struct {
-	gw storage.StorageClient
+	gw     storage.StorageClient
+	logger log.Logger
 }
 
-func New(gw storage.StorageClient) cachers.Сacher {
-	return server{gw: gw}
+func New(gw storage.StorageClient, logger log.Logger) cachers.Сacher {
+	return server{gw: gw, logger: logger}
 }
 
 func (s server) Put(key string, data []byte) error {
@@ -27,6 +28,7 @@ func (s server) Put(key string, data []byte) error {
 	}}
 	_, err := s.gw.Store(ctx, &req)
 	if err != nil {
+		s.logger.Error(err)
 		return err
 	}
 	return err
@@ -47,7 +49,8 @@ func (s server) Len() int {
 	req := storage.LenRequest{}
 	result, err := s.gw.Len(ctx, &req)
 	if err != nil {
-		log.Fatal( err)
+		s.logger.Error(err)
+		return 0
 	}
 	return int(result.GetLength())
 }

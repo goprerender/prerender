@@ -9,7 +9,6 @@ import (
 	"github.com/go-ozzo/ozzo-routing/v2/access"
 	"github.com/go-ozzo/ozzo-routing/v2/fault"
 	"github.com/go-ozzo/ozzo-routing/v2/slash"
-	"github.com/robfig/cron/v3"
 	"google.golang.org/grpc"
 	"log"
 	"net/http"
@@ -18,14 +17,13 @@ import (
 	"prerender/internal/cachers/rstorage"
 	"prerender/internal/healthcheck"
 	"prerender/internal/renderer"
-	"prerender/internal/sitemap"
 	"prerender/pkg/api/storage"
 	prLog "prerender/pkg/log"
 	"time"
 )
 
 const (
-	address     = "localhost:50051"
+	address = "localhost:50051"
 )
 
 // Version indicates the current version of the application.
@@ -35,7 +33,7 @@ var flagDebug = flag.Bool("debug", false, "debug level")
 
 func main() {
 	// create root logger tagged with server version
-	logger := prLog.New(*flagDebug).With(nil, "Prerender", Version)
+	logger := prLog.New(*flagDebug).With(nil, "PR Server", Version)
 
 	// Set up a connection to the server.
 	conn, err := grpc.Dial(address, grpc.WithInsecure(), grpc.WithBlock())
@@ -46,10 +44,7 @@ func main() {
 
 	sc := storage.NewStorageClient(conn)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	pc := rstorage.New(sc)
+	pc := rstorage.New(sc, logger)
 
 	var allocator context.Context
 	var cancelAlloc context.CancelFunc
@@ -62,22 +57,8 @@ func main() {
 		allocator = context.Background()
 	}
 
-	ctx, cancel2 := chromedp.NewContext(allocator)
-	defer cancel2()
-
-	pl := cron.VerbosePrintfLogger(log.New(os.Stdout, "cron: ", log.LstdFlags))
-
-	c := cron.New(cron.WithChain(
-		cron.SkipIfStillRunning(pl)))
-
-	startCroneRefresh(ctx, c, pc, logger)
-
-	var sm = func() {
-		sitemap.BySitemap(ctx, pc, false, logger)
-		c.Start()
-	}
-
-	go sm()
+	ctx, cancel := chromedp.NewContext(allocator)
+	defer cancel()
 
 	// build HTTP server
 	address := fmt.Sprintf(":%v", "3000")
@@ -90,7 +71,7 @@ func main() {
 	go routing.GracefulShutdown(hs, 10*time.Second, logger.Infof)
 	logger.Infof("Prerender %v is running at %v", Version, address)
 	if err := hs.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Error(err)
+		logger.Error("ListenAndServe error: ", err)
 		os.Exit(-1)
 	}
 }
@@ -112,26 +93,13 @@ func buildHandler(ctx context.Context, pc cachers.Сacher, logger prLog.Logger) 
 	return router
 }
 
-func startCroneRefresh(ctx context.Context, c *cron.Cron, pc cachers.Сacher, logger prLog.Logger) {
-	spec := "01 00 * * *"
-	//spec := "*/1 * * * *"
-	_, err := c.AddFunc(spec, func() {
-		logger.Debug(spec)
-		sitemap.BySitemap(ctx, pc, true, logger)
-	})
-	if err != nil {
-		panic(err)
-	}
-	logger.Info("Crone Refresh init Done")
-}
-
 func handleRequest(ctx context.Context, pc cachers.Сacher, logger prLog.Logger) routing.Handler {
 	return func(c *routing.Context) error {
 
 		queryString := c.Request.URL.Query().Get("url")
 
 		newTabCtx, cancel := chromedp.NewContext(ctx)
-		ctx, cancel := context.WithTimeout(newTabCtx, time.Second*30)
+		ctx, cancel := context.WithTimeout(newTabCtx, time.Minute)
 		defer cancel()
 
 		res, err := renderer.DoRender(ctx, queryString, pc, false, logger)
@@ -142,4 +110,3 @@ func handleRequest(ctx context.Context, pc cachers.Сacher, logger prLog.Logger)
 		return c.Write(res)
 	}
 }
-

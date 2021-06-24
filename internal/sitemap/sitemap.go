@@ -3,7 +3,6 @@ package sitemap
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"github.com/chromedp/chromedp"
 	"github.com/yterajima/go-sitemap"
 	"io/ioutil"
@@ -36,19 +35,20 @@ func BySitemap(ctx context.Context, pc cachers.Сacher, force bool, logger log.L
 func doSitemap(ctx context.Context, pc cachers.Сacher, force bool, sitemapUrl string, logger log.Logger) {
 	siteMap, err := sitemap.Get(sitemapUrl, nil)
 	if err != nil {
-		fmt.Println(err)
+		logger.Error("Get Sitemap: ", err)
 	}
 
-	logger.Info("Sitemap len: ", len(siteMap.URL))
+	logger.Infof("Sitemap len: %d", len(siteMap.URL))
 
 	for _, URL := range siteMap.URL {
-		logger.Info(URL.Loc)
+		logger.Info("SM URL: ", URL.Loc)
 		newTabCtx, cancel := chromedp.NewContext(ctx)
-		ctx, cancel := context.WithTimeout(newTabCtx, time.Second*30)
+		ctx, cancel := context.WithTimeout(newTabCtx, time.Minute*5)
 
 		_, err := renderer.DoRender(ctx, URL.Loc, pc, force, logger)
 		if err != nil {
-			logger.Error(err)
+			logger.Error("Sitemap Renderer error: ", err)
+			cancel()
 			continue
 		}
 		cancel()

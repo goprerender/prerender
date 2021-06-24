@@ -15,6 +15,7 @@ default: run
 build:
 	go build -o prerender ./cmd/server/main.go
 	go build -o storage ./cmd/storage/main.go
+	go build -o worker ./cmd/worker/main.go
 #	go build ${LDFLAGS} -o prerender ./cmd/server/main.go
 #	go build ${LDFLAGS} -o storage ./cmd/storage/main.go
 clean:
