@@ -26,6 +26,7 @@ const (
 var Version = "1.0.0-beta.0"
 
 var flagDebug = flag.Bool("debug", false, "debug level")
+var flagForce = flag.Bool("force", true, "force refresh")
 
 func main() {
 	// create root logger tagged with server version
@@ -64,7 +65,7 @@ func main() {
 	startCroneRefresh(ctx, c, pc, logger)
 
 	var sm = func() {
-		sitemap.BySitemap(ctx, pc, false, logger)
+		sitemap.BySitemap(ctx, pc, *flagForce, logger)
 		c.Start()
 	}
 

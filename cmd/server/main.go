@@ -19,6 +19,7 @@ import (
 	"prerender/internal/renderer"
 	"prerender/pkg/api/storage"
 	prLog "prerender/pkg/log"
+	"strings"
 	"time"
 )
 
@@ -97,12 +98,20 @@ func handleRequest(ctx context.Context, pc cachers.Сacher, logger prLog.Logger)
 	return func(c *routing.Context) error {
 
 		queryString := c.Request.URL.Query().Get("url")
+		queryForce := c.Request.URL.Query().Get("force")
+
+		force := false
+
+		if queryForce == "true" || strings.Contains(queryString, "force=true") {
+			logger.Warn("Force is true")
+			force = true
+		}
 
 		newTabCtx, cancel := chromedp.NewContext(ctx)
 		ctx, cancel := context.WithTimeout(newTabCtx, time.Minute)
 		defer cancel()
 
-		res, err := renderer.DoRender(ctx, queryString, pc, false, logger)
+		res, err := renderer.DoRender(ctx, queryString, pc, force, logger)
 		if err != nil {
 			return err
 		}

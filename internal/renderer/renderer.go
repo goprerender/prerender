@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/chromedp/cdproto/dom"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 	"net/http"
 	"net/url"
@@ -38,6 +39,7 @@ func DoRender(ctx context.Context, queryString string, pc cachers.Сacher, force
 	value, err := pc.Get(key)
 	if force || err != nil {
 		err1 := chromedp.Run(ctx,
+			network.SetBlockedURLS([]string{"google-analytics.com", "mc.yandex.ru"}),
 			chromedp.Navigate(requestURL),
 			//chromedp.Sleep(time.Second*60), // ToDo add dynamics sleep timeout
 			chromedp.ActionFunc(func(ctx context.Context) error {
