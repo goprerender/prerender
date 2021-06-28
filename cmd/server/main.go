@@ -86,7 +86,7 @@ func buildHandler(e *executor.Executor, logger prLog.Logger) *routing.Router {
 func handleRequest(e *executor.Executor, logger prLog.Logger) routing.Handler {
 	return func(c *routing.Context) error {
 
-		queryString := c.Request.URL.Query().Get("helper")
+		queryString := c.Request.URL.Query().Get("url")
 		queryForce := c.Request.URL.Query().Get("force")
 
 		force := false
