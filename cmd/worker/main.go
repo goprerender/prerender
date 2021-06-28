@@ -42,6 +42,8 @@ func main() {
 	pc := rstorage.New(sc, logger)
 
 	r := renderer.NewRenderer(pc, logger)
+	defer r.Cancel()
+
 	e := executor.NewExecutor(r, pc, logger)
 
 	pl := cron.VerbosePrintfLogger(log.New(os.Stdout, "cron: ", log.LstdFlags))

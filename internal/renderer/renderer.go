@@ -89,6 +89,10 @@ func (r *Renderer) Setup() {
 	}
 }
 
+func (r *Renderer) Cancel() {
+	r.cancel()
+}
+
 func GetDebugURL(logger log.Logger) (string, error) {
 	resp, err := http.Get("http://localhost:9222/json/version")
 	if err != nil {

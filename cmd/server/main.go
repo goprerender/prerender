@@ -46,6 +46,8 @@ func main() {
 	pc := rstorage.New(sc, logger)
 
 	r := renderer.NewRenderer(pc, logger)
+	defer r.Cancel()
+
 	e := executor.NewExecutor(r, pc, logger)
 
 	// build HTTP server
