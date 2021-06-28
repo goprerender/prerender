@@ -1,10 +1,8 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
-	"github.com/chromedp/chromedp"
 	"github.com/go-ozzo/ozzo-routing/v2"
 	"github.com/go-ozzo/ozzo-routing/v2/access"
 	"github.com/go-ozzo/ozzo-routing/v2/fault"
@@ -13,7 +11,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"prerender/internal/cachers"
 	"prerender/internal/cachers/rstorage"
 	"prerender/internal/healthcheck"
 	"prerender/internal/renderer"
@@ -47,25 +44,13 @@ func main() {
 
 	pc := rstorage.New(sc, logger)
 
-	var allocator context.Context
-	var cancelAlloc context.CancelFunc
-
-	devToolWsUrl, err := renderer.GetDebugURL(logger)
-	if err == nil {
-		allocator, cancelAlloc = chromedp.NewRemoteAllocator(context.Background(), devToolWsUrl)
-		defer cancelAlloc()
-	} else {
-		allocator = context.Background()
-	}
-
-	ctx, cancel := chromedp.NewContext(allocator)
-	defer cancel()
+	r := renderer.NewRenderer(pc, logger)
 
 	// build HTTP server
 	address := fmt.Sprintf(":%v", "3000")
 	hs := &http.Server{
 		Addr:    address,
-		Handler: buildHandler(ctx, pc, logger),
+		Handler: buildHandler(r, logger),
 	}
 
 	// start the HTTP server with graceful shutdown
@@ -77,7 +62,7 @@ func main() {
 	}
 }
 
-func buildHandler(ctx context.Context, pc cachers.Сacher, logger prLog.Logger) *routing.Router {
+func buildHandler(r *renderer.Renderer, logger prLog.Logger) *routing.Router {
 	router := routing.New()
 
 	router.Use(
@@ -89,12 +74,12 @@ func buildHandler(ctx context.Context, pc cachers.Сacher, logger prLog.Logger) 
 
 	healthcheck.RegisterHandlers(router, Version)
 
-	router.Get("/render", handleRequest(ctx, pc, logger))
+	router.Get("/render", handleRequest(r, logger))
 
 	return router
 }
 
-func handleRequest(ctx context.Context, pc cachers.Сacher, logger prLog.Logger) routing.Handler {
+func handleRequest(r *renderer.Renderer, logger prLog.Logger) routing.Handler {
 	return func(c *routing.Context) error {
 
 		queryString := c.Request.URL.Query().Get("url")
@@ -107,11 +92,7 @@ func handleRequest(ctx context.Context, pc cachers.Сacher, logger prLog.Logger)
 			force = true
 		}
 
-		newTabCtx, cancel := chromedp.NewContext(ctx)
-		ctx, cancel := context.WithTimeout(newTabCtx, time.Minute)
-		defer cancel()
-
-		res, err := renderer.DoRender(ctx, queryString, pc, force, logger)
+		res, err := r.DoRender(queryString, force)
 		if err != nil {
 			return err
 		}

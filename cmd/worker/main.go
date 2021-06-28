@@ -1,15 +1,12 @@
 package main
 
 import (
-	"context"
 	"flag"
-	"github.com/chromedp/chromedp"
 	"github.com/robfig/cron/v3"
 	"google.golang.org/grpc"
 	"log"
 	"os"
 	"os/signal"
-	"prerender/internal/cachers"
 	"prerender/internal/cachers/rstorage"
 	"prerender/internal/renderer"
 	"prerender/internal/sitemap"
@@ -43,29 +40,17 @@ func main() {
 
 	pc := rstorage.New(sc, logger)
 
-	var allocator context.Context
-	var cancelAlloc context.CancelFunc
-
-	devToolWsUrl, err := renderer.GetDebugURL(logger)
-	if err == nil {
-		allocator, cancelAlloc = chromedp.NewRemoteAllocator(context.Background(), devToolWsUrl)
-		defer cancelAlloc()
-	} else {
-		allocator = context.Background()
-	}
-
-	ctx, cancel := chromedp.NewContext(allocator)
-	defer cancel()
+	r := renderer.NewRenderer(pc, logger)
 
 	pl := cron.VerbosePrintfLogger(log.New(os.Stdout, "cron: ", log.LstdFlags))
 
 	c := cron.New(cron.WithChain(
 		cron.SkipIfStillRunning(pl)))
 
-	startCroneRefresh(ctx, c, pc, logger)
+	startCroneRefresh(r, c, logger)
 
 	var sm = func() {
-		sitemap.BySitemap(ctx, pc, *flagForce, logger)
+		sitemap.BySitemap(r, *flagForce, logger)
 		c.Start()
 	}
 
@@ -78,12 +63,12 @@ func main() {
 	logger.Info("Service the server received a stop signal...")
 }
 
-func startCroneRefresh(ctx context.Context, c *cron.Cron, pc cachers.Сacher, logger prLog.Logger) {
+func startCroneRefresh(r *renderer.Renderer, c *cron.Cron, logger prLog.Logger) {
 	spec := "01 00 * * *"
 	//spec := "*/1 * * * *"
 	_, err := c.AddFunc(spec, func() {
 		logger.Debug(spec)
-		sitemap.BySitemap(ctx, pc, true, logger)
+		sitemap.BySitemap(r, true, logger)
 	})
 	if err != nil {
 		panic(err)

@@ -1,18 +1,14 @@
 package sitemap
 
 import (
-	"context"
 	"encoding/json"
-	"github.com/chromedp/chromedp"
 	"github.com/yterajima/go-sitemap"
 	"io/ioutil"
-	"prerender/internal/cachers"
 	"prerender/internal/renderer"
 	"prerender/pkg/log"
-	"time"
 )
 
-func BySitemap(ctx context.Context, pc cachers.Сacher, force bool, logger log.Logger) {
+func BySitemap(r *renderer.Renderer, force bool, logger log.Logger) {
 	type sitemaps []string
 
 	f, err := ioutil.ReadFile("sitemaps.json")
@@ -28,11 +24,11 @@ func BySitemap(ctx context.Context, pc cachers.Сacher, force bool, logger log.L
 	}
 
 	for _, j := range sitemapUrls {
-		go doSitemap(ctx, pc, force, j, logger)
+		go doSitemap(r, force, j, logger)
 	}
 }
 
-func doSitemap(ctx context.Context, pc cachers.Сacher, force bool, sitemapUrl string, logger log.Logger) {
+func doSitemap(r *renderer.Renderer, force bool, sitemapUrl string, logger log.Logger) {
 	siteMap, err := sitemap.Get(sitemapUrl, nil)
 	if err != nil {
 		logger.Error("Get Sitemap: ", err)
@@ -42,17 +38,13 @@ func doSitemap(ctx context.Context, pc cachers.Сacher, force bool, sitemapUrl s
 
 	for _, URL := range siteMap.URL {
 		logger.Info("SM URL: ", URL.Loc)
-		newTabCtx, cancel := chromedp.NewContext(ctx)
-		ctx, cancel := context.WithTimeout(newTabCtx, time.Minute*5)
 
-		_, err := renderer.DoRender(ctx, URL.Loc, pc, force, logger)
+		_, err := r.DoRender(URL.Loc, force)
 		if err != nil {
 			logger.Error("Sitemap Renderer error: ", err)
-			cancel()
 			continue
 		}
-		cancel()
 	}
 
-	logger.Infof("Finished %s, Cache len: %d", sitemapUrl, pc.Len())
+	logger.Infof("Finished %s, Cache len: %d", sitemapUrl, r.GetCacher().Len())
 }
