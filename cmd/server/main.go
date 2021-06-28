@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"prerender/internal/cachers/rstorage"
+	"prerender/internal/executor"
 	"prerender/internal/healthcheck"
 	"prerender/internal/renderer"
 	"prerender/pkg/api/storage"
@@ -45,12 +46,13 @@ func main() {
 	pc := rstorage.New(sc, logger)
 
 	r := renderer.NewRenderer(pc, logger)
+	e := executor.NewExecutor(r, pc, logger)
 
 	// build HTTP server
 	address := fmt.Sprintf(":%v", "3000")
 	hs := &http.Server{
 		Addr:    address,
-		Handler: buildHandler(r, logger),
+		Handler: buildHandler(e, logger),
 	}
 
 	// start the HTTP server with graceful shutdown
@@ -62,7 +64,7 @@ func main() {
 	}
 }
 
-func buildHandler(r *renderer.Renderer, logger prLog.Logger) *routing.Router {
+func buildHandler(e *executor.Executor, logger prLog.Logger) *routing.Router {
 	router := routing.New()
 
 	router.Use(
@@ -74,15 +76,15 @@ func buildHandler(r *renderer.Renderer, logger prLog.Logger) *routing.Router {
 
 	healthcheck.RegisterHandlers(router, Version)
 
-	router.Get("/render", handleRequest(r, logger))
+	router.Get("/render", handleRequest(e, logger))
 
 	return router
 }
 
-func handleRequest(r *renderer.Renderer, logger prLog.Logger) routing.Handler {
+func handleRequest(e *executor.Executor, logger prLog.Logger) routing.Handler {
 	return func(c *routing.Context) error {
 
-		queryString := c.Request.URL.Query().Get("url")
+		queryString := c.Request.URL.Query().Get("helper")
 		queryForce := c.Request.URL.Query().Get("force")
 
 		force := false
@@ -92,7 +94,7 @@ func handleRequest(r *renderer.Renderer, logger prLog.Logger) routing.Handler {
 			force = true
 		}
 
-		res, err := r.DoRender(queryString, force)
+		res, err := e.Execute(queryString, force)
 		if err != nil {
 			return err
 		}

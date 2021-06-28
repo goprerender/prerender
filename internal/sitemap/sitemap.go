@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"github.com/yterajima/go-sitemap"
 	"io/ioutil"
-	"prerender/internal/renderer"
+	"prerender/internal/executor"
 	"prerender/pkg/log"
 )
 
-func BySitemap(r *renderer.Renderer, force bool, logger log.Logger) {
+func BySitemap(r *executor.Executor, force bool, logger log.Logger) {
 	type sitemaps []string
 
 	f, err := ioutil.ReadFile("sitemaps.json")
@@ -28,7 +28,7 @@ func BySitemap(r *renderer.Renderer, force bool, logger log.Logger) {
 	}
 }
 
-func doSitemap(r *renderer.Renderer, force bool, sitemapUrl string, logger log.Logger) {
+func doSitemap(e *executor.Executor, force bool, sitemapUrl string, logger log.Logger) {
 	siteMap, err := sitemap.Get(sitemapUrl, nil)
 	if err != nil {
 		logger.Error("Get Sitemap: ", err)
@@ -39,12 +39,12 @@ func doSitemap(r *renderer.Renderer, force bool, sitemapUrl string, logger log.L
 	for _, URL := range siteMap.URL {
 		logger.Info("SM URL: ", URL.Loc)
 
-		_, err := r.DoRender(URL.Loc, force)
+		_, err := e.Execute(URL.Loc, force)
 		if err != nil {
 			logger.Error("Sitemap Renderer error: ", err)
 			continue
 		}
 	}
 
-	logger.Infof("Finished %s, Cache len: %d", sitemapUrl, r.GetCacher().Len())
+	logger.Infof("Finished %s, Cache len: %d", sitemapUrl, e.GetPC().Len())
 }

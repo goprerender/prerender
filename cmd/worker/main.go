@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"prerender/internal/cachers/rstorage"
+	"prerender/internal/executor"
 	"prerender/internal/renderer"
 	"prerender/internal/sitemap"
 	"prerender/pkg/api/storage"
@@ -41,16 +42,17 @@ func main() {
 	pc := rstorage.New(sc, logger)
 
 	r := renderer.NewRenderer(pc, logger)
+	e := executor.NewExecutor(r, pc, logger)
 
 	pl := cron.VerbosePrintfLogger(log.New(os.Stdout, "cron: ", log.LstdFlags))
 
 	c := cron.New(cron.WithChain(
 		cron.SkipIfStillRunning(pl)))
 
-	startCroneRefresh(r, c, logger)
+	startCroneRefresh(e, c, logger)
 
 	var sm = func() {
-		sitemap.BySitemap(r, *flagForce, logger)
+		sitemap.BySitemap(e, *flagForce, logger)
 		c.Start()
 	}
 
@@ -63,12 +65,12 @@ func main() {
 	logger.Info("Service the server received a stop signal...")
 }
 
-func startCroneRefresh(r *renderer.Renderer, c *cron.Cron, logger prLog.Logger) {
+func startCroneRefresh(e *executor.Executor, c *cron.Cron, logger prLog.Logger) {
 	spec := "01 00 * * *"
 	//spec := "*/1 * * * *"
 	_, err := c.AddFunc(spec, func() {
 		logger.Debug(spec)
-		sitemap.BySitemap(r, true, logger)
+		sitemap.BySitemap(e, true, logger)
 	})
 	if err != nil {
 		panic(err)

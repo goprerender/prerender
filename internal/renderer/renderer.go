@@ -2,18 +2,13 @@ package renderer
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
-	"fmt"
 	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 	"net/http"
-	"net/url"
-	"prerender/internal/archive"
 	"prerender/internal/cachers"
 	"prerender/pkg/log"
-	"strings"
 	"time"
 )
 
@@ -33,9 +28,7 @@ func NewRenderer(pc cachers.Сacher, logger log.Logger) *Renderer {
 	return r
 }
 
-func (r *Renderer) DoRender(url string, force bool) (string, error) {
-
-	hostPath, requestURL := parsUrl(url, r.logger)
+func (r *Renderer) DoRender(requestURL string, force bool) (string, error) {
 
 	newTabCtx, cancel := chromedp.NewContext(r.allocatorCtx)
 	defer cancel()
@@ -47,75 +40,44 @@ func (r *Renderer) DoRender(url string, force bool) (string, error) {
 	var restart = false
 
 	var res string
-	key := fmt.Sprintf("%x", sha256.Sum256([]byte(hostPath)))
-	value, err := r.pc.Get(key)
-	if force || err != nil {
-	start:
-		err1 := chromedp.Run(ctx,
-			network.SetBlockedURLS([]string{"google-analytics.com", "mc.yandex.ru"}),
-			chromedp.Navigate(requestURL),
-			//chromedp.Sleep(time.Second*20), // ToDo add dynamics sleep timeout
-			chromedp.ActionFunc(func(ctx context.Context) error {
-				node, err2 := dom.GetDocument().Do(ctx)
-				if err2 != nil {
-					r.logger.Error("GetDocument: ", err2)
-					return err2
-				}
-				res, err2 = dom.GetOuterHTML().WithNodeID(node.NodeID).Do(ctx)
+
+start:
+	err1 := chromedp.Run(ctx,
+		network.SetBlockedURLS([]string{"google-analytics.com", "mc.yandex.ru"}),
+		chromedp.Navigate(requestURL),
+		//chromedp.Sleep(time.Second*20), // ToDo add dynamics sleep timeout
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			node, err2 := dom.GetDocument().Do(ctx)
+			if err2 != nil {
+				r.logger.Error("GetDocument: ", err2)
 				return err2
-			}),
-		)
-
-		if err1 != nil {
-			r.logger.Error("ChromeDP error: ", err1)
-			if attempts != 0 {
-				time.Sleep(15 * time.Second)
-				attempts--
-				goto start
 			}
-			if attempts == 0 && !restart {
-				r.cancel()
-				r.Setup()
-				attempts = 5
-				restart = true
-				goto start
-			}
+			res, err2 = dom.GetOuterHTML().WithNodeID(node.NodeID).Do(ctx)
+			return err2
+		}),
+	)
 
-			return "", err1
+	if err1 != nil {
+		r.logger.Error("ChromeDP error: ", err1)
+		if attempts != 0 {
+			time.Sleep(15 * time.Second)
+			attempts--
+			goto start
+		}
+		if attempts == 0 && !restart {
+			r.cancel()
+			r.Setup()
+			attempts = 5
+			restart = true
+			goto start
 		}
 
-		restart = false
-
-		htmlGzip := archive.GzipHtml(res, hostPath, "", r.logger)
-		err4 := r.pc.Put(key, htmlGzip)
-		if err4 != nil {
-			r.logger.Warn("Can't store result in cache")
-		}
-	} else {
-		res = archive.UnzipHtml(value, r.logger)
+		return "", err1
 	}
+
+	restart = false
 
 	return res, nil
-}
-
-func parsUrl(queryString string, logger log.Logger) (string, string) {
-	u, err := url.Parse(queryString)
-	if err != nil {
-		logger.Error("Pars URL: ", err)
-	}
-
-	requestURL := ""
-	hostPath := ""
-
-	if u.Path != "/" && strings.HasSuffix(u.Path, "/") {
-		path := strings.TrimRight(u.Path, "/")
-		requestURL = u.Scheme + "://" + u.Host + path
-		hostPath = u.Host + path
-	} else {
-		requestURL = queryString
-		hostPath = u.Host + u.Path
-	}
-	return hostPath, requestURL
 }
 
 func (r *Renderer) Setup() {
