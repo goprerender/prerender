@@ -28,54 +28,56 @@ func NewRenderer(pc cachers.Сacher, logger log.Logger) *Renderer {
 	return r
 }
 
-func (r *Renderer) DoRender(requestURL string, force bool) (string, error) {
+func (r *Renderer) DoRender(requestURL string) (string, error) {
 
 	newTabCtx, cancel := chromedp.NewContext(r.allocatorCtx)
 	defer cancel()
 
-	ctx, cancel := context.WithTimeout(newTabCtx, time.Second*30)
+	ctx, cancel := context.WithTimeout(newTabCtx, time.Second*120)
 	defer cancel()
 
-	var attempts = 5
+	var attempts = 0
 	var restart = false
 
 	var res string
 
 start:
-	err1 := chromedp.Run(ctx,
+	err := chromedp.Run(ctx,
 		network.SetBlockedURLS([]string{"google-analytics.com", "mc.yandex.ru"}),
 		chromedp.Navigate(requestURL),
-		//chromedp.Sleep(time.Second*20), // ToDo add dynamics sleep timeout
+		//chromedp.Sleep(time.Second*3), // ToDo add dynamics sleep timeout
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			node, err2 := dom.GetDocument().Do(ctx)
-			if err2 != nil {
-				r.logger.Error("GetDocument: ", err2)
-				return err2
+			node, err := dom.GetDocument().Do(ctx)
+			if err != nil {
+				r.logger.Error("GetDocument: ", err)
+				return err
 			}
-			res, err2 = dom.GetOuterHTML().WithNodeID(node.NodeID).Do(ctx)
-			return err2
+			res, err = dom.GetOuterHTML().WithNodeID(node.NodeID).Do(ctx)
+			return err
 		}),
 	)
 
-	if err1 != nil {
-		r.logger.Error("ChromeDP error: ", err1)
-		if attempts != 0 {
+	if err != nil {
+		r.logger.Error("ChromeDP error: ", err, ", url:", requestURL)
+		if attempts <= 5 {
+			r.logger.Error("ChromeDP sleep for 15 sec ", attempts)
 			time.Sleep(15 * time.Second)
-			attempts--
+			attempts++
+			r.logger.Error("ChromeDP trying attempt: ", attempts)
 			goto start
 		}
 		if attempts == 0 && !restart {
 			r.cancel()
 			r.Setup()
-			attempts = 5
+			attempts = 0
+			r.logger.Warn("Reset attempts... ", attempts)
 			restart = true
+			r.logger.Error("ChromeDP trying to restart Chrome...")
 			goto start
 		}
 
-		return "", err1
+		return "", err
 	}
-
-	restart = false
 
 	return res, nil
 }
