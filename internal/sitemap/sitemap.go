@@ -24,7 +24,7 @@ func BySitemap(r *executor.Executor, force bool, logger log.Logger) {
 	}
 
 	for _, j := range sitemapUrls {
-		go doSitemap(r, force, j, logger)
+		doSitemap(r, force, j, logger)
 	}
 }
 
