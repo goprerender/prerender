@@ -53,7 +53,7 @@ func (s *server) Get(ctx context.Context, in *storage.GetRequest) (*storage.GetR
 }
 
 func (s *server) Len(ctx context.Context, in *storage.LenRequest) (*storage.LenReplay, error) {
-	s.logger.Warn("Received: Len request")
+	//s.logger.Warn("Received: Len request")
 	return &storage.LenReplay{Length: int32(gc.Len(true))}, nil
 }
 
