@@ -14,6 +14,7 @@ import (
 	"prerender/pkg/api/storage"
 	prLog "prerender/pkg/log"
 	"syscall"
+	"time"
 )
 
 const (
@@ -24,7 +25,7 @@ const (
 var Version = "1.0.0-beta.0"
 
 var flagDebug = flag.Bool("debug", false, "debug level")
-var flagForce = flag.Bool("force", true, "force refresh")
+var flagForce = flag.Bool("force", false, "force refresh")
 
 func main() {
 	// create root logger tagged with server version
@@ -65,6 +66,7 @@ func main() {
 
 	<-exit
 	logger.Info("Service the server received a stop signal...")
+	time.Sleep(15*time.Second)
 }
 
 func startCroneRefresh(e *executor.Executor, c *cron.Cron, logger prLog.Logger) {
