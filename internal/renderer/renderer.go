@@ -59,20 +59,21 @@ start:
 
 	if err != nil {
 		r.logger.Error("ChromeDP error: ", err, ", url:", requestURL)
-		if attempts <= 5 {
-			r.logger.Error("ChromeDP sleep for 15 sec ", attempts)
-			time.Sleep(15 * time.Second)
+		if attempts < 3 {
 			attempts++
-			r.logger.Error("ChromeDP trying attempt: ", attempts)
+			r.logger.Warn("ChromeDP sleep for 5 sec, att: ", attempts)
+			time.Sleep(5 * time.Second)
 			goto start
 		}
-		if attempts == 0 && !restart {
+		if attempts >= 3 && !restart {
+			r.logger.Warn("Closing Chrome.. ", attempts)
 			r.cancel()
+			r.logger.Warn("Starting Chrome.. ", attempts)
 			r.Setup()
 			attempts = 0
-			r.logger.Warn("Reset attempts... ", attempts)
 			restart = true
-			r.logger.Error("ChromeDP trying to restart Chrome...")
+			r.logger.Warn("Waiting for restart Chrome, sleep 60 sec...")
+			time.Sleep(60 * time.Second)
 			goto start
 		}
 
@@ -87,7 +88,7 @@ func (r *Renderer) Setup() {
 	if err == nil {
 		r.allocatorCtx, r.cancel = chromedp.NewRemoteAllocator(context.Background(), devToolWsUrl)
 	} else {
-		r.allocatorCtx = context.Background()
+		r.allocatorCtx, r.cancel = context.WithCancel(context.Background())
 	}
 }
 

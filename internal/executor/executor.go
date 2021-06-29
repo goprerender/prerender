@@ -43,8 +43,8 @@ func (e *Executor) Execute(url string, force bool) (string, error) {
 		}
 
 		htmlGzip := archive.GzipHtml(res, hostPath, "", e.logger)
-		err4 := e.pc.Put(key, htmlGzip)
-		if err4 != nil {
+		err = e.pc.Put(key, htmlGzip)
+		if err != nil {
 			e.logger.Warn("Can't store result in cache")
 		}
 	} else {

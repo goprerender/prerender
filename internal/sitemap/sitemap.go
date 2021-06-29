@@ -41,7 +41,7 @@ func doSitemap(e *executor.Executor, force bool, sitemapUrl string, logger log.L
 
 		_, err := e.Execute(URL.Loc, force)
 		if err != nil {
-			logger.Error("Sitemap Renderer error: ", err)
+			logger.Error("Sitemap Renderer error: ", err, ", url: ", URL.Loc)
 			continue
 		}
 	}
