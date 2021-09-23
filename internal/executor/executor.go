@@ -37,7 +37,7 @@ func (e *Executor) Execute(url string, force bool) (string, error) {
 	value, err := e.pc.Get(key)
 	if force || err != nil {
 
-		res, err := e.renderer.DoRender(requestURL)
+		res, err = e.renderer.DoRender(requestURL)
 		if err != nil {
 			return res, err
 		}
