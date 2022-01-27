@@ -36,7 +36,11 @@ func (e *Executor) Execute(url string, force bool) (string, error) {
 	key := fmt.Sprintf("%x", sha256.Sum256([]byte(hostPath)))
 	value, err := e.pc.Get(key)
 	if force || err != nil {
-
+		/*start:
+		if e.renderer.IsRestarting() {
+			time.Sleep(time.Second)
+			goto start
+		}*/
 		res, err = e.renderer.DoRender(requestURL)
 		if err != nil {
 			return res, err

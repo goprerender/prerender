@@ -7,8 +7,10 @@ import (
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 	"net/http"
+	"os/exec"
 	"prerender/internal/cachers"
 	"prerender/pkg/log"
+	"sync"
 	"time"
 )
 
@@ -16,7 +18,15 @@ type Renderer struct {
 	allocatorCtx context.Context
 	cancel       context.CancelFunc
 	pc           cachers.Сacher
+	isRestarting bool
+	mutex        sync.Mutex
 	logger       log.Logger
+}
+
+func (r *Renderer) IsRestarting() bool {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return r.isRestarting
 }
 
 func NewRenderer(pc cachers.Сacher, logger log.Logger) *Renderer {
@@ -29,7 +39,7 @@ func NewRenderer(pc cachers.Сacher, logger log.Logger) *Renderer {
 }
 
 func (r *Renderer) DoRender(requestURL string) (string, error) {
-
+start:
 	newTabCtx, cancel := chromedp.NewContext(r.allocatorCtx)
 	defer cancel()
 
@@ -37,15 +47,16 @@ func (r *Renderer) DoRender(requestURL string) (string, error) {
 	defer cancel()
 
 	var attempts = 0
-	var restart = false
 
 	var res string
 
-start:
+next:
+	headers := network.Headers{"X-Prerender-Next": "1"}
+
 	err := chromedp.Run(ctx,
 		network.SetBlockedURLS([]string{"google-analytics.com", "mc.yandex.ru"}),
+		network.SetExtraHTTPHeaders(headers),
 		chromedp.Navigate(requestURL),
-		//chromedp.Sleep(time.Second*3), // ToDo add dynamics sleep timeout
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			node, err := dom.GetDocument().Do(ctx)
 			if err != nil {
@@ -62,18 +73,23 @@ start:
 		if attempts < 3 {
 			attempts++
 			r.logger.Warn("ChromeDP sleep for 5 sec, att: ", attempts)
-			time.Sleep(5 * time.Second)
-			goto start
+			time.Sleep(1 * time.Second)
+			goto next
 		}
-		if attempts >= 3 && !restart {
+		if attempts >= 3 && !r.IsRestarting() {
 			r.logger.Warn("Closing Chrome.. ", attempts)
 			r.cancel()
+			r.logger.Warn("Restarting headless-shell container... ", attempts)
+			err := r.rebootContainer()
+			if err != nil {
+				return "", err
+			}
+			time.Sleep(1 * time.Second)
 			r.logger.Warn("Starting Chrome.. ", attempts)
 			r.Setup()
 			attempts = 0
-			restart = true
-			r.logger.Warn("Waiting for restart Chrome, sleep 60 sec...")
-			time.Sleep(60 * time.Second)
+			r.logger.Warn("Waiting for restart Chrome, sleep 1 sec...")
+			time.Sleep(1 * time.Second)
 			goto start
 		}
 
@@ -88,6 +104,7 @@ func (r *Renderer) Setup() {
 	if err == nil {
 		r.allocatorCtx, r.cancel = chromedp.NewRemoteAllocator(context.Background(), devToolWsUrl)
 	} else {
+		r.logger.Warn("Trying to connect to local chrome")
 		r.allocatorCtx, r.cancel = context.WithCancel(context.Background())
 	}
 }
@@ -99,15 +116,53 @@ func (r *Renderer) Cancel() {
 func GetDebugURL(logger log.Logger) (string, error) {
 	resp, err := http.Get("http://localhost:9222/json/version")
 	if err != nil {
-		logger.Warn("Get Debug URL: ", err)
+		logger.Warn("Error get debug URL: ", err)
 		return "", err
 	}
 
 	var result map[string]interface{}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		logger.Error("Decoder Debug URL: ", err)
+		logger.Error("Error decode json for debug URL: ", err)
 		return "", err
 	}
-	return result["webSocketDebuggerUrl"].(string), nil
+
+	debugUrl := result["webSocketDebuggerUrl"].(string)
+	logger.Info("Debug URL: ", debugUrl)
+
+	return debugUrl, nil
+}
+
+func (r *Renderer) rebootContainer() error {
+	r.mutex.Lock()
+	defer func() {
+		r.isRestarting = false
+		r.mutex.Unlock()
+	}()
+
+	r.isRestarting = true
+
+	container := "headless-shell"
+
+	path, err := exec.LookPath("docker")
+	if err != nil {
+		r.logger.Errorf("installing docker is in your future")
+		return err
+	}
+	r.logger.Infof("docker is available at %s\n", path)
+
+	out, err := exec.Command("docker", "restart", container).Output()
+	if err != nil {
+		r.logger.Error(err)
+		return err
+	}
+
+	outResult := string(out)
+	r.logger.Info(outResult)
+	if outResult != container {
+		r.logger.Errorf("Not a good answer from docker...")
+		return err
+	}
+
+	return nil
 }

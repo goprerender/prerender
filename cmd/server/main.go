@@ -71,7 +71,7 @@ func buildHandler(e *executor.Executor, logger prLog.Logger) *routing.Router {
 
 	router.Use(
 		// all these handlers are shared by every route
-		access.Logger(logger.Infof),
+		accessLogFunc(logger.Infof),
 		slash.Remover(http.StatusMovedPermanently),
 		fault.Recovery(logger.Infof),
 	)
@@ -85,6 +85,7 @@ func buildHandler(e *executor.Executor, logger prLog.Logger) *routing.Router {
 
 func handleRequest(e *executor.Executor, logger prLog.Logger) routing.Handler {
 	return func(c *routing.Context) error {
+		c.Response.Header().Set("X-Prerender", "Prerender by (+https://github.com/goprerender/prerender)")
 
 		queryString := c.Request.URL.Query().Get("url")
 		queryForce := c.Request.URL.Query().Get("force")
@@ -103,4 +104,15 @@ func handleRequest(e *executor.Executor, logger prLog.Logger) routing.Handler {
 
 		return c.Write(res)
 	}
+}
+
+func accessLogFunc(log access.LogFunc) routing.Handler {
+	var logger = func(req *http.Request, rw *access.LogResponseWriter, elapsed float64) {
+		clientIP := access.GetClientIP(req)
+		bot := req.UserAgent() // Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)
+		requestLine := fmt.Sprintf("%s %s %s %s", req.Method, req.URL.String(), req.Proto, bot)
+		log(`[%s] [%.3fms] %s %d %d`, clientIP, elapsed, requestLine, rw.Status, rw.BytesWritten)
+
+	}
+	return access.CustomLogger(logger)
 }
