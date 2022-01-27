@@ -89,7 +89,6 @@ next:
 			r.Setup()
 			attempts = 0
 			r.logger.Warn("Waiting for restart Chrome, sleep 1 sec...")
-			time.Sleep(1 * time.Second)
 			goto start
 		}
 
@@ -163,6 +162,8 @@ func (r *Renderer) rebootContainer() error {
 		r.logger.Errorf("Not a good answer from docker...")
 		return err
 	}
+	
+	time.Sleep(5 * time.Second)
 
 	return nil
 }

@@ -109,10 +109,39 @@ func handleRequest(e *executor.Executor, logger prLog.Logger) routing.Handler {
 func accessLogFunc(log access.LogFunc) routing.Handler {
 	var logger = func(req *http.Request, rw *access.LogResponseWriter, elapsed float64) {
 		clientIP := access.GetClientIP(req)
-		bot := req.UserAgent() // Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)
-		requestLine := fmt.Sprintf("%s %s %s %s", req.Method, req.URL.String(), req.Proto, bot)
+
+		//Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.99 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)
+		//Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)
+
+		userAgent := req.UserAgent()
+		bot := userAgent
+
+		i := strings.Index(userAgent, "(compatible;")
+		if i >= 0 {
+			bot = userAgent[i:]
+			a := strings.Split(getStringInBetween(bot, "(", ")"), ";")
+			if len(a) > 1 {
+				bot = strings.TrimSpace(a[1])
+			}
+		}
+
+		requestLine := fmt.Sprintf("%s %s %s %s", req.Method, strings.TrimPrefix(req.URL.String(), "/render?url="), req.Proto, bot)
 		log(`[%s] [%.3fms] %s %d %d`, clientIP, elapsed, requestLine, rw.Status, rw.BytesWritten)
 
 	}
 	return access.CustomLogger(logger)
+}
+
+// getStringInBetween Returns empty string if no start string found
+func getStringInBetween(str string, start string, end string) (result string) {
+	s := strings.Index(str, start)
+	if s == -1 {
+		return
+	}
+	s += len(start)
+	e := strings.Index(str, end)
+	if e == -1 {
+		return
+	}
+	return str[s:e]
 }
