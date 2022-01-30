@@ -3,13 +3,13 @@ package renderer
 import (
 	"context"
 	"encoding/json"
-	"github.com/chromedp/cdproto/dom"
+	"errors"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 	"net/http"
 	"os/exec"
-	"prerender/internal/cachers"
 	"prerender/pkg/log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,8 +17,10 @@ import (
 type Renderer struct {
 	allocatorCtx context.Context
 	cancel       context.CancelFunc
-	pc           cachers.Сacher
+	isRemote     bool
+	isStarted    bool
 	isRestarting bool
+	lastStart    time.Time
 	mutex        sync.Mutex
 	logger       log.Logger
 }
@@ -29,26 +31,37 @@ func (r *Renderer) IsRestarting() bool {
 	return r.isRestarting
 }
 
-func NewRenderer(pc cachers.Сacher, logger log.Logger) *Renderer {
+func NewRenderer(logger log.Logger) *Renderer {
 	r := &Renderer{
-		pc:     pc,
 		logger: logger,
 	}
 	r.Setup()
 	return r
 }
 
+var ErrNotResponding = errors.New("error: Chrome not responding")
+
 func (r *Renderer) DoRender(requestURL string) (string, error) {
+	var res string
+	var attempts = 0
+
 start:
+	if r.IsRestarting() { //ToDo try to use callback or https://github.com/ReactiveX/RxGo
+		r.logger.Warn("Docker container is restarting... sleep 5 sec and try again ", attempts)
+		time.Sleep(5 * time.Second)
+		attempts++
+		if attempts > 5 {
+			return res, ErrNotResponding
+		}
+		goto start
+	}
+
 	newTabCtx, cancel := chromedp.NewContext(r.allocatorCtx)
 	defer cancel()
 
-	ctx, cancel := context.WithTimeout(newTabCtx, time.Second*120)
+	//context:
+	ctx, cancel := context.WithTimeout(newTabCtx, time.Second*30)
 	defer cancel()
-
-	var attempts = 0
-
-	var res string
 
 next:
 	headers := network.Headers{"X-Prerender-Next": "1"}
@@ -57,39 +70,47 @@ next:
 		network.SetBlockedURLS([]string{"google-analytics.com", "mc.yandex.ru"}),
 		network.SetExtraHTTPHeaders(headers),
 		chromedp.Navigate(requestURL),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			node, err := dom.GetDocument().Do(ctx)
-			if err != nil {
-				r.logger.Error("GetDocument: ", err)
-				return err
-			}
-			res, err = dom.GetOuterHTML().WithNodeID(node.NodeID).Do(ctx)
-			return err
-		}),
+		chromedp.WaitReady("body"),
+		chromedp.OuterHTML("html", &res, chromedp.ByQuery),
 	)
 
 	if err != nil {
 		r.logger.Error("ChromeDP error: ", err, ", url:", requestURL)
+
+		if strings.HasPrefix(err.Error(), "could not dial \"ws:") {
+			cancel()
+
+			attempts++
+
+			if attempts >= 3 && !r.IsRestarting() {
+				r.logger.Warn("Try to re setup Chrome...")
+				r.Setup()
+				r.logger.Warn("Chrome setup complete...")
+				attempts = 0
+			}
+
+			time.Sleep(1 * time.Second)
+			goto start
+		}
+
+		if strings.HasPrefix(err.Error(), "Could not find node with given id") {
+			cancel()
+			goto start
+		}
+
 		if attempts < 3 {
 			attempts++
-			r.logger.Warn("ChromeDP sleep for 5 sec, att: ", attempts)
+			r.logger.Warn("ChromeDP sleep for 1 sec, att: ", attempts)
+
 			time.Sleep(1 * time.Second)
-			goto next
-		}
-		if attempts >= 3 && !r.IsRestarting() {
-			r.logger.Warn("Closing Chrome.. ", attempts)
-			r.cancel()
-			r.logger.Warn("Restarting headless-shell container... ", attempts)
-			err := r.rebootContainer()
-			if err != nil {
-				return "", err
+
+			if err == context.DeadlineExceeded {
+				goto start
 			}
-			time.Sleep(1 * time.Second)
-			r.logger.Warn("Starting Chrome.. ", attempts)
-			r.Setup()
-			attempts = 0
-			r.logger.Warn("Waiting for restart Chrome, sleep 1 sec...")
-			goto start
+			if err == context.Canceled {
+				goto start
+			}
+			goto next
 		}
 
 		return "", err
@@ -99,12 +120,22 @@ next:
 }
 
 func (r *Renderer) Setup() {
+	if !r.isStarted && !r.IsRestarting() {
+		err := r.setupContainer()
+		if err != nil {
+			r.logger.Warnf("Container not setup properly or not available")
+		}
+	}
+
+	r.logger.Infof("Try to setup Chrome")
 	devToolWsUrl, err := GetDebugURL(r.logger)
 	if err == nil {
 		r.allocatorCtx, r.cancel = chromedp.NewRemoteAllocator(context.Background(), devToolWsUrl)
+		r.isRemote = true
 	} else {
 		r.logger.Warn("Trying to connect to local chrome")
 		r.allocatorCtx, r.cancel = context.WithCancel(context.Background())
+		r.isRemote = false
 	}
 }
 
@@ -113,6 +144,7 @@ func (r *Renderer) Cancel() {
 }
 
 func GetDebugURL(logger log.Logger) (string, error) {
+	logger.Infof("Try to get data from remote Chrome...")
 	resp, err := http.Get("http://localhost:9222/json/version")
 	if err != nil {
 		logger.Warn("Error get debug URL: ", err)
@@ -132,6 +164,34 @@ func GetDebugURL(logger log.Logger) (string, error) {
 	return debugUrl, nil
 }
 
+const container = "headless-shell"
+
+func (r *Renderer) setupContainer() error {
+	r.mutex.Lock()
+	defer func() {
+		r.isRestarting = false
+		r.mutex.Unlock()
+	}()
+
+	err := r.checkDocker()
+	if err != nil {
+		return err
+	}
+
+	err = r.checkImage()
+	if err != nil {
+		return err
+	}
+
+	r.lastStart = time.Now()
+
+	r.isStarted = true
+
+	time.Sleep(5 * time.Second)
+
+	return nil
+}
+
 func (r *Renderer) rebootContainer() error {
 	r.mutex.Lock()
 	defer func() {
@@ -139,16 +199,13 @@ func (r *Renderer) rebootContainer() error {
 		r.mutex.Unlock()
 	}()
 
-	r.isRestarting = true
-
-	container := "headless-shell"
-
-	path, err := exec.LookPath("docker")
-	if err != nil {
-		r.logger.Errorf("installing docker is in your future")
-		return err
+	if time.Now().Sub(r.lastStart) < 3*time.Minute {
+		r.logger.Warnf("Docker was restarted less than 3 minutes, now sleep 5 sec and exiting...")
+		time.Sleep(5 * time.Second)
+		return nil
 	}
-	r.logger.Infof("docker is available at %s\n", path)
+
+	r.isRestarting = true
 
 	out, err := exec.Command("docker", "restart", container).Output()
 	if err != nil {
@@ -157,13 +214,69 @@ func (r *Renderer) rebootContainer() error {
 	}
 
 	outResult := string(out)
-	r.logger.Info(outResult)
-	if outResult != container {
+	r.logger.Infof("outFromCmd: %s, cont: %s", outResult, container)
+	if !strings.Contains(outResult, container) {
 		r.logger.Errorf("Not a good answer from docker...")
+		//return err
+	}
+	r.lastStart = time.Now()
+
+	r.isStarted = true
+
+	time.Sleep(5 * time.Second)
+
+	return nil
+}
+
+func (r *Renderer) checkDocker() error {
+	path, err := exec.LookPath("docker")
+	if err != nil {
+		r.logger.Errorf("installing docker is in your future")
 		return err
 	}
-	
-	time.Sleep(5 * time.Second)
+	r.logger.Infof("docker is available at %s\n", path)
+	return nil
+}
+
+func (r *Renderer) checkImage() error {
+	out, err := exec.Command("docker", "ps", "-a", container).Output()
+	if err != nil {
+		r.logger.Error(err)
+		return err
+	}
+
+	outResult := string(out)
+	r.logger.Infof("outFromCmd: %s, cont: %s", outResult, container)
+	if !strings.Contains(outResult, container) {
+		r.logger.Errorf("Not a good answer from docker...")
+		//return err
+	}
+	if !strings.Contains(outResult, "Up") {
+		r.logger.Errorf("Image not working...")
+		out, err := exec.Command("docker", "restart", container).Output()
+		if err != nil {
+			r.logger.Error(err)
+			return err
+		}
+		outResult = string(out)
+		if !strings.Contains(outResult, container) {
+			r.logger.Errorf("Not a good answer from docker...")
+			//return err
+		}
+
+		out, err = exec.Command("docker", "ps", "-a", container).Output()
+		if err != nil {
+			r.logger.Error(err)
+			return err
+		}
+		if !strings.Contains(outResult, "Up") {
+			r.logger.Errorf("Image not working still...")
+		}
+	}
+
+	r.lastStart = time.Now()
+
+	r.isStarted = true
 
 	return nil
 }

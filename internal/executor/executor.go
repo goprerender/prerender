@@ -28,12 +28,17 @@ func (e *Executor) GetPC() cachers.Сacher {
 	return e.pc
 }
 
-func (e *Executor) Execute(url string, force bool) (string, error) {
+func (e *Executor) Execute(query string, force bool) (string, error) {
 	var res string
 
-	hostPath, requestURL := helper.Parse(url, e.logger)
+	hostPath, err := helper.Parse(query, e.logger)
+	if err != nil {
+
+		return hostPath, err
+	}
 
 	key := fmt.Sprintf("%x", sha256.Sum256([]byte(hostPath)))
+	//e.logger.Infof("hostPath: %s, query: %s", hostPath, query)
 	value, err := e.pc.Get(key)
 	if force || err != nil {
 		/*start:
@@ -41,10 +46,12 @@ func (e *Executor) Execute(url string, force bool) (string, error) {
 			time.Sleep(time.Second)
 			goto start
 		}*/
-		res, err = e.renderer.DoRender(requestURL)
+		res, err = e.renderer.DoRender(query)
 		if err != nil {
 			return res, err
 		}
+
+		//e.logger.Infof("html: %s", res)
 
 		htmlGzip := archive.GzipHtml(res, hostPath, "", e.logger)
 		err = e.pc.Put(key, htmlGzip)

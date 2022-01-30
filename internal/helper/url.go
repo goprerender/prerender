@@ -1,27 +1,27 @@
 package helper
 
 import (
+	"errors"
 	"net/url"
 	"prerender/pkg/log"
 	"strings"
 )
 
-func Parse(queryString string, logger log.Logger) (string, string) {
+var ErrRedirect = errors.New("err: trailing slash, need redirection")
+
+func Parse(queryString string, logger log.Logger) (string, error) {
 	u, err := url.Parse(queryString)
 	if err != nil {
 		logger.Error("Pars URL: ", err)
 	}
 
-	requestURL := ""
 	hostPath := ""
 
 	if u.Path != "/" && strings.HasSuffix(u.Path, "/") {
-		path := strings.TrimRight(u.Path, "/")
-		requestURL = u.Scheme + "://" + u.Host + path
-		hostPath = u.Host + path
-	} else {
-		requestURL = queryString
-		hostPath = u.Host + u.Path
+		return hostPath, ErrRedirect
 	}
-	return hostPath, requestURL
+
+	hostPath = u.Host + u.Path + u.RawQuery
+
+	return hostPath, nil
 }

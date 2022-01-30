@@ -42,7 +42,7 @@ func main() {
 
 	pc := rstorage.New(sc, logger)
 
-	r := renderer.NewRenderer(pc, logger)
+	r := renderer.NewRenderer(logger)
 	defer r.Cancel()
 
 	e := executor.NewExecutor(r, pc, logger)
@@ -66,7 +66,7 @@ func main() {
 
 	<-exit
 	logger.Info("Service the server received a stop signal...")
-	time.Sleep(15*time.Second)
+	time.Sleep(15 * time.Second)
 }
 
 func startCroneRefresh(e *executor.Executor, c *cron.Cron, logger prLog.Logger) {

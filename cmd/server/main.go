@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/go-ozzo/ozzo-routing/v2"
@@ -14,6 +15,7 @@ import (
 	"prerender/internal/cachers/rstorage"
 	"prerender/internal/executor"
 	"prerender/internal/healthcheck"
+	"prerender/internal/helper"
 	"prerender/internal/renderer"
 	"prerender/pkg/api/storage"
 	prLog "prerender/pkg/log"
@@ -45,7 +47,7 @@ func main() {
 
 	pc := rstorage.New(sc, logger)
 
-	r := renderer.NewRenderer(pc, logger)
+	r := renderer.NewRenderer(logger)
 	defer r.Cancel()
 
 	e := executor.NewExecutor(r, pc, logger)
@@ -87,20 +89,38 @@ func handleRequest(e *executor.Executor, logger prLog.Logger) routing.Handler {
 	return func(c *routing.Context) error {
 		c.Response.Header().Set("X-Prerender", "Prerender by (+https://github.com/goprerender/prerender)")
 
-		queryString := c.Request.URL.Query().Get("url")
-		queryForce := c.Request.URL.Query().Get("force")
+		rawRequest := c.Request.URL.String()
+		if !strings.Contains(rawRequest, "url=") {
+			return errors.New("error: url param not found in request")
+		}
+
+		queryString := strings.TrimPrefix(rawRequest, "/render?url=")
+
+		const xForce = "x_force=true"
 
 		force := false
 
-		if queryForce == "true" || strings.Contains(queryString, "force=true") {
+		if strings.Contains(queryString, xForce) {
 			logger.Warn("Force is true")
+			queryString = strings.Replace(queryString, "&"+xForce, "", -1)
+			queryString = strings.Replace(queryString, xForce, "", -1)
 			force = true
 		}
 
 		res, err := e.Execute(queryString, force)
 		if err != nil {
+			if err == helper.ErrRedirect {
+				status := http.StatusMovedPermanently
+				if c.Request.Method != "GET" {
+					status = http.StatusTemporaryRedirect
+				}
+				http.Redirect(c.Response, c.Request, strings.TrimRight(queryString, "/"), status)
+				c.Abort()
+			}
 			return err
 		}
+
+		res = stripAllTags(res, "<script>", "</script>")
 
 		return c.Write(res)
 	}
@@ -144,4 +164,22 @@ func getStringInBetween(str string, start string, end string) (result string) {
 		return
 	}
 	return str[s:e]
+}
+
+func stripAllTags(str, start, end string) string {
+
+	s := strings.Index(str, start[:len(start)-1])
+	if s == -1 {
+		return str
+	}
+
+	e := strings.Index(str, end)
+	if e == -1 {
+		return str
+	}
+	e += len(end)
+
+	str = str[0:s] + str[e:]
+
+	return stripAllTags(str, start, end)
 }
