@@ -95,6 +95,9 @@ func handleRequest(e *executor.Executor, logger prLog.Logger) routing.Handler {
 		}
 
 		queryString := strings.TrimPrefix(rawRequest, "/render?url=")
+		if strings.Contains(queryString, "escaped_fragment") {
+			return c.WriteWithStatus("error: escaped_fragment not supported now", http.StatusNotFound)
+		}
 
 		const xForce = "x_force=true"
 

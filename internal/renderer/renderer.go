@@ -73,14 +73,14 @@ next:
 		network.SetBlockedURLS([]string{"google-analytics.com", "mc.yandex.ru"}),
 		network.SetExtraHTTPHeaders(headers),
 		chromedp.Navigate(requestURL),
-		chromedp.WaitReady("body"),
+		//chromedp.WaitReady("body"),
 		chromedp.OuterHTML("html", &res, chromedp.ByQuery),
 	)
 
 	endTime := time.Now()
 
 	delta := endTime.Sub(startTime).Seconds()
-	r.logger.Infof("Duration: %f seconds", delta)
+	r.logger.Debugf("Duration: %f seconds", delta)
 
 	if err != nil {
 		r.logger.Error("ChromeDP error: ", err, ", url:", requestURL)
