@@ -20,6 +20,7 @@ type Renderer struct {
 	isRemote     bool
 	isStarted    bool
 	isRestarting bool
+	dockerPath   string
 	lastStart    time.Time
 	mutex        sync.Mutex
 	logger       log.Logger
@@ -45,6 +46,8 @@ func (r *Renderer) DoRender(requestURL string) (string, error) {
 	var res string
 	var attempts = 0
 
+	startTime := time.Now()
+
 start:
 	if r.IsRestarting() { //ToDo try to use callback or https://github.com/ReactiveX/RxGo
 		r.logger.Warn("Docker container is restarting... sleep 5 sec and try again ", attempts)
@@ -59,8 +62,8 @@ start:
 	newTabCtx, cancel := chromedp.NewContext(r.allocatorCtx)
 	defer cancel()
 
-	//context:
-	ctx, cancel := context.WithTimeout(newTabCtx, time.Second*30)
+	//new context with timeout
+	ctx, cancel := context.WithTimeout(newTabCtx, time.Second*15)
 	defer cancel()
 
 next:
@@ -74,6 +77,11 @@ next:
 		chromedp.OuterHTML("html", &res, chromedp.ByQuery),
 	)
 
+	endTime := time.Now()
+
+	delta := endTime.Sub(startTime).Seconds()
+	r.logger.Infof("Duration: %f seconds", delta)
+
 	if err != nil {
 		r.logger.Error("ChromeDP error: ", err, ", url:", requestURL)
 
@@ -84,7 +92,11 @@ next:
 
 			if attempts >= 3 && !r.IsRestarting() {
 				r.logger.Warn("Try to re setup Chrome...")
-				r.Setup()
+				err := r.Restart()
+				if err != nil {
+					r.logger.Warn("Error restarting container...")
+					return "", err
+				}
 				r.logger.Warn("Chrome setup complete...")
 				attempts = 0
 			}
@@ -98,6 +110,12 @@ next:
 			goto start
 		}
 
+		if strings.HasPrefix(err.Error(), "exec: \"google-chrome\": executable file not found in") {
+			r.isStarted = false
+			r.Setup()
+			goto start
+		}
+
 		if attempts < 3 {
 			attempts++
 			r.logger.Warn("ChromeDP sleep for 1 sec, att: ", attempts)
@@ -105,9 +123,13 @@ next:
 			time.Sleep(1 * time.Second)
 
 			if err == context.DeadlineExceeded {
+				cancel()
+				time.Sleep(3 * time.Second)
 				goto start
 			}
 			if err == context.Canceled {
+				cancel()
+				time.Sleep(3 * time.Second)
 				goto start
 			}
 			goto next
@@ -120,7 +142,10 @@ next:
 }
 
 func (r *Renderer) Setup() {
-	if !r.isStarted && !r.IsRestarting() {
+	if !r.isStarted {
+		if r.IsRestarting() {
+			return
+		}
 		err := r.setupContainer()
 		if err != nil {
 			r.logger.Warnf("Container not setup properly or not available")
@@ -129,6 +154,7 @@ func (r *Renderer) Setup() {
 
 	r.logger.Infof("Try to setup Chrome")
 	devToolWsUrl, err := GetDebugURL(r.logger)
+
 	if err == nil {
 		r.allocatorCtx, r.cancel = chromedp.NewRemoteAllocator(context.Background(), devToolWsUrl)
 		r.isRemote = true
@@ -137,6 +163,19 @@ func (r *Renderer) Setup() {
 		r.allocatorCtx, r.cancel = context.WithCancel(context.Background())
 		r.isRemote = false
 	}
+}
+
+func (r *Renderer) Restart() error {
+	if r.isRemote {
+		if r.IsRestarting() {
+			err := r.rebootContainer()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	r.Setup()
+	return nil
 }
 
 func (r *Renderer) Cancel() {
@@ -173,10 +212,12 @@ func (r *Renderer) setupContainer() error {
 		r.mutex.Unlock()
 	}()
 
-	err := r.checkDocker()
+	path, err := r.checkDocker()
 	if err != nil {
 		return err
 	}
+
+	r.dockerPath = path
 
 	err = r.checkImage()
 	if err != nil {
@@ -187,7 +228,7 @@ func (r *Renderer) setupContainer() error {
 
 	r.isStarted = true
 
-	time.Sleep(5 * time.Second)
+	//time.Sleep(1 * time.Second)
 
 	return nil
 }
@@ -207,7 +248,7 @@ func (r *Renderer) rebootContainer() error {
 
 	r.isRestarting = true
 
-	out, err := exec.Command("docker", "restart", container).Output()
+	out, err := exec.Command(r.dockerPath, "restart", container).Output()
 	if err != nil {
 		r.logger.Error(err)
 		return err
@@ -217,29 +258,29 @@ func (r *Renderer) rebootContainer() error {
 	r.logger.Infof("outFromCmd: %s, cont: %s", outResult, container)
 	if !strings.Contains(outResult, container) {
 		r.logger.Errorf("Not a good answer from docker...")
-		//return err
+		return err
 	}
 	r.lastStart = time.Now()
 
 	r.isStarted = true
 
-	time.Sleep(5 * time.Second)
+	//time.Sleep(1 * time.Second)
 
 	return nil
 }
 
-func (r *Renderer) checkDocker() error {
+func (r *Renderer) checkDocker() (string, error) {
 	path, err := exec.LookPath("docker")
 	if err != nil {
 		r.logger.Errorf("installing docker is in your future")
-		return err
+		return "", err
 	}
 	r.logger.Infof("docker is available at %s\n", path)
-	return nil
+	return path, nil
 }
 
 func (r *Renderer) checkImage() error {
-	out, err := exec.Command("docker", "ps", "-a", container).Output()
+	out, err := exec.Command(r.dockerPath, "ps", "-a").Output()
 	if err != nil {
 		r.logger.Error(err)
 		return err
