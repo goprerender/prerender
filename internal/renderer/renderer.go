@@ -70,7 +70,7 @@ next:
 	headers := network.Headers{"X-Prerender-Next": "1"}
 
 	err := chromedp.Run(ctx,
-		network.SetBlockedURLS([]string{"google-analytics.com", "mc.yandex.ru", "maps.googleapis.com"}),
+		network.SetBlockedURLS([]string{"google-analytics.com", "mc.yandex.ru", "maps.googleapis.com", "googletagmanager.com"}),
 		network.SetExtraHTTPHeaders(headers),
 		chromedp.Navigate(requestURL),
 		//chromedp.WaitReady("body"),
