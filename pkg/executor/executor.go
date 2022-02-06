@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"github.com/goprerender/prerender/internal/archive"
 	"github.com/goprerender/prerender/internal/cachers"
-	"github.com/goprerender/prerender/internal/helper"
 	"github.com/goprerender/prerender/pkg/log"
 	"github.com/goprerender/prerender/pkg/renderer"
+	"github.com/goprerender/prerender/pkg/url"
 )
 
 type Executor struct {
@@ -31,7 +31,7 @@ func (e *Executor) GetPC() cachers.Сacher {
 func (e *Executor) Execute(query string, force bool) (string, error) {
 	var res string
 
-	hostPath, err := helper.Parse(query, e.logger)
+	hostPath, err := url.SlashRemover(query, e.logger)
 	if err != nil {
 
 		return hostPath, err

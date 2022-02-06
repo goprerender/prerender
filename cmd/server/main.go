@@ -10,11 +10,11 @@ import (
 	"github.com/go-ozzo/ozzo-routing/v2/slash"
 	"github.com/goprerender/prerender/internal/cachers/rstorage"
 	"github.com/goprerender/prerender/internal/healthcheck"
-	"github.com/goprerender/prerender/internal/helper"
 	"github.com/goprerender/prerender/pkg/api/storage"
 	"github.com/goprerender/prerender/pkg/executor"
 	prLog "github.com/goprerender/prerender/pkg/log"
 	"github.com/goprerender/prerender/pkg/renderer"
+	"github.com/goprerender/prerender/pkg/url"
 	"google.golang.org/grpc"
 	"log"
 	"net/http"
@@ -112,7 +112,7 @@ func handleRequest(e *executor.Executor, logger prLog.Logger) routing.Handler {
 
 		res, err := e.Execute(queryString, force)
 		if err != nil {
-			if err == helper.ErrRedirect {
+			if err == url.ErrRedirect {
 				status := http.StatusMovedPermanently
 				if c.Request.Method != "GET" {
 					status = http.StatusTemporaryRedirect

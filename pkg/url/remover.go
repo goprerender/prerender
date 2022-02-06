@@ -1,4 +1,4 @@
-package helper
+package url
 
 import (
 	"errors"
@@ -9,7 +9,7 @@ import (
 
 var ErrRedirect = errors.New("err: trailing slash, need redirection")
 
-func Parse(queryString string, logger log.Logger) (string, error) {
+func SlashRemover(queryString string, logger log.Logger) (string, error) {
 	u, err := url.Parse(queryString)
 	if err != nil {
 		logger.Error("Pars URL: ", err)
