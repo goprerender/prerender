@@ -2,7 +2,7 @@ package inmemory
 
 import (
 	"github.com/bluele/gcache"
-	"prerender/internal/cachers"
+	"github.com/goprerender/prerender/internal/cachers"
 	"time"
 )
 
@@ -12,7 +12,7 @@ type repository struct {
 }
 
 func New(gc gcache.Cache) cachers.Сacher {
-	return repository{gc: gc, dd: time.Hour*24*7}
+	return repository{gc: gc, dd: time.Hour * 24 * 7}
 }
 
 func (r repository) Put(key string, data []byte) error {

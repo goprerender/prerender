@@ -8,17 +8,17 @@ import (
 	"github.com/go-ozzo/ozzo-routing/v2/access"
 	"github.com/go-ozzo/ozzo-routing/v2/fault"
 	"github.com/go-ozzo/ozzo-routing/v2/slash"
+	"github.com/goprerender/prerender/internal/cachers/rstorage"
+	"github.com/goprerender/prerender/internal/executor"
+	"github.com/goprerender/prerender/internal/healthcheck"
+	"github.com/goprerender/prerender/internal/helper"
+	"github.com/goprerender/prerender/internal/renderer"
+	"github.com/goprerender/prerender/pkg/api/storage"
+	prLog "github.com/goprerender/prerender/pkg/log"
 	"google.golang.org/grpc"
 	"log"
 	"net/http"
 	"os"
-	"prerender/internal/cachers/rstorage"
-	"prerender/internal/executor"
-	"prerender/internal/healthcheck"
-	"prerender/internal/helper"
-	"prerender/internal/renderer"
-	"prerender/pkg/api/storage"
-	prLog "prerender/pkg/log"
 	"strings"
 	"time"
 )
@@ -124,6 +124,10 @@ func handleRequest(e *executor.Executor, logger prLog.Logger) routing.Handler {
 		}
 
 		res = stripAllTags(res, "<script>", "</script>")
+
+		if strings.Contains(res, "<meta name=\"robots\" content=\"noindex\">") {
+			return c.WriteWithStatus(res, http.StatusNotFound)
+		}
 
 		return c.Write(res)
 	}

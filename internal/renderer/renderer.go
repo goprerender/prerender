@@ -6,9 +6,9 @@ import (
 	"errors"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
+	"github.com/goprerender/prerender/pkg/log"
 	"net/http"
 	"os/exec"
-	"prerender/pkg/log"
 	"strings"
 	"sync"
 	"time"
@@ -63,7 +63,7 @@ start:
 	defer cancel()
 
 	//new context with timeout
-	ctx, cancel := context.WithTimeout(newTabCtx, time.Second*15)
+	ctx, cancel := context.WithTimeout(newTabCtx, time.Second*10)
 	defer cancel()
 
 next:

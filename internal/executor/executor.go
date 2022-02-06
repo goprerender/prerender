@@ -3,11 +3,11 @@ package executor
 import (
 	"crypto/sha256"
 	"fmt"
-	"prerender/internal/archive"
-	"prerender/internal/cachers"
-	"prerender/internal/helper"
-	"prerender/internal/renderer"
-	"prerender/pkg/log"
+	"github.com/goprerender/prerender/internal/archive"
+	"github.com/goprerender/prerender/internal/cachers"
+	"github.com/goprerender/prerender/internal/helper"
+	"github.com/goprerender/prerender/internal/renderer"
+	"github.com/goprerender/prerender/pkg/log"
 )
 
 type Executor struct {

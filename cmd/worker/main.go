@@ -2,17 +2,17 @@ package main
 
 import (
 	"flag"
+	"github.com/goprerender/prerender/internal/cachers/rstorage"
+	"github.com/goprerender/prerender/internal/executor"
+	"github.com/goprerender/prerender/internal/renderer"
+	"github.com/goprerender/prerender/internal/sitemap"
+	"github.com/goprerender/prerender/pkg/api/storage"
+	prLog "github.com/goprerender/prerender/pkg/log"
 	"github.com/robfig/cron/v3"
 	"google.golang.org/grpc"
 	"log"
 	"os"
 	"os/signal"
-	"prerender/internal/cachers/rstorage"
-	"prerender/internal/executor"
-	"prerender/internal/renderer"
-	"prerender/internal/sitemap"
-	"prerender/pkg/api/storage"
-	prLog "prerender/pkg/log"
 	"syscall"
 	"time"
 )

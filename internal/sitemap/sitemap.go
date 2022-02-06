@@ -2,10 +2,10 @@ package sitemap
 
 import (
 	"encoding/json"
+	"github.com/goprerender/prerender/internal/executor"
+	"github.com/goprerender/prerender/pkg/log"
 	"github.com/yterajima/go-sitemap"
 	"io/ioutil"
-	"prerender/internal/executor"
-	"prerender/pkg/log"
 )
 
 func BySitemap(r *executor.Executor, force bool, logger log.Logger) {

@@ -2,8 +2,8 @@ package helper
 
 import (
 	"errors"
+	"github.com/goprerender/prerender/pkg/log"
 	"net/url"
-	"prerender/pkg/log"
 	"strings"
 )
 

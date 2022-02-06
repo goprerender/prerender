@@ -3,8 +3,8 @@ package archive
 import (
 	"bytes"
 	"compress/gzip"
+	"github.com/goprerender/prerender/pkg/log"
 	"io"
-	"prerender/pkg/log"
 	"strings"
 	"time"
 )

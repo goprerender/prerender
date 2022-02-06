@@ -1,4 +1,4 @@
-module prerender
+module github.com/goprerender/prerender
 
 go 1.15
 

@@ -3,9 +3,9 @@ package rstorage
 import (
 	"context"
 	"github.com/golang/protobuf/ptypes"
-	"prerender/internal/cachers"
-	"prerender/pkg/api/storage"
-	"prerender/pkg/log"
+	"github.com/goprerender/prerender/internal/cachers"
+	"github.com/goprerender/prerender/pkg/api/storage"
+	"github.com/goprerender/prerender/pkg/log"
 	"time"
 )
 
