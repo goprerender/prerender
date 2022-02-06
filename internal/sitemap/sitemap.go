@@ -2,7 +2,7 @@ package sitemap
 
 import (
 	"encoding/json"
-	"github.com/goprerender/prerender/internal/executor"
+	"github.com/goprerender/prerender/pkg/executor"
 	"github.com/goprerender/prerender/pkg/log"
 	"github.com/yterajima/go-sitemap"
 	"io/ioutil"

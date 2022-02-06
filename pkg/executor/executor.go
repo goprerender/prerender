@@ -6,8 +6,8 @@ import (
 	"github.com/goprerender/prerender/internal/archive"
 	"github.com/goprerender/prerender/internal/cachers"
 	"github.com/goprerender/prerender/internal/helper"
-	"github.com/goprerender/prerender/internal/renderer"
 	"github.com/goprerender/prerender/pkg/log"
+	"github.com/goprerender/prerender/pkg/renderer"
 )
 
 type Executor struct {

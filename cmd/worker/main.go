@@ -3,11 +3,11 @@ package main
 import (
 	"flag"
 	"github.com/goprerender/prerender/internal/cachers/rstorage"
-	"github.com/goprerender/prerender/internal/executor"
-	"github.com/goprerender/prerender/internal/renderer"
 	"github.com/goprerender/prerender/internal/sitemap"
 	"github.com/goprerender/prerender/pkg/api/storage"
+	"github.com/goprerender/prerender/pkg/executor"
 	prLog "github.com/goprerender/prerender/pkg/log"
+	"github.com/goprerender/prerender/pkg/renderer"
 	"github.com/robfig/cron/v3"
 	"google.golang.org/grpc"
 	"log"
