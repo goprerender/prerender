@@ -3,8 +3,8 @@ package executor
 import (
 	"crypto/sha256"
 	"fmt"
-	"github.com/goprerender/prerender/internal/archive"
 	"github.com/goprerender/prerender/internal/cachers"
+	"github.com/goprerender/prerender/pkg/archive"
 	"github.com/goprerender/prerender/pkg/log"
 	"github.com/goprerender/prerender/pkg/renderer"
 	"github.com/goprerender/prerender/pkg/url"
