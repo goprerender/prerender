@@ -112,7 +112,7 @@ func handleRequest(e *executor.Executor, logger prLog.Logger) routing.Handler {
 
 		res, err := e.Execute(queryString, force)
 		if err != nil {
-			if err == url.ErrRedirect {
+			if errors.Is(err, url.ErrRedirect) {
 				status := http.StatusMovedPermanently
 				if c.Request.Method != "GET" {
 					status = http.StatusTemporaryRedirect
