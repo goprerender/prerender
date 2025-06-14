@@ -20,21 +20,24 @@ import (
 )
 
 const (
-	containerName        = "headless-shell"
-	debugURL             = "http://localhost:9222/json/version"
-	renderTimeout        = 60 * time.Second
-	containerStartDelay  = 10 * time.Second // Увеличено время ожидания
-	containerReadyDelay  = 2 * time.Second
-	maxRestartAttempts   = 3
-	dockerHealthCheckCmd = "docker inspect -f '{{.State.Status}}' " + containerName
-	maxConcurrentRenders = 10 // Ограничение одновременных рендеров
+	containerName         = "headless-shell"
+	debugURL              = "http://localhost:9222/json/version"
+	renderTimeout         = 60 * time.Second
+	containerStartDelay   = 10 * time.Second
+	containerReadyDelay   = 2 * time.Second
+	maxRestartAttempts    = 3
+	dockerHealthCheckCmd  = "docker inspect -f '{{.State.Status}}' " + containerName
+	maxConcurrentRenders  = 10
+	containerReadyTimeout = 30 * time.Second
 )
 
 var (
-	ErrNotResponding    = errors.New("chrome not responding")
-	ErrNameNotResolved  = errors.New("domain name not resolved")
-	ErrContainerRestart = errors.New("container restart failed")
-	ErrTimeoutExceeded  = errors.New("render timeout exceeded")
+	ErrNotResponding      = errors.New("chrome not responding")
+	ErrNameNotResolved    = errors.New("domain name not resolved")
+	ErrContainerRestart   = errors.New("container restart failed")
+	ErrTimeoutExceeded    = errors.New("render timeout exceeded")
+	ErrContainerNotReady  = errors.New("container not ready")
+	ErrContainerStartFail = errors.New("container start failed")
 )
 
 type Renderer struct {
@@ -51,7 +54,10 @@ type Renderer struct {
 	blockedURLs       []string
 	restartingFlag    bool
 	wsURL             string
-	semaphore         chan struct{} // Семафор для ограничения одновременных запросов
+	semaphore         chan struct{}
+	readyCh           chan struct{}
+	readyMutex        sync.Mutex
+	containerReady    bool // Переименовано поле (было isContainerReady)
 }
 
 type RenderResult struct {
@@ -78,7 +84,9 @@ func NewRenderer(logger log.Logger) *Renderer {
 			"api-maps.yandex.ru",
 		},
 		semaphore: make(chan struct{}, maxConcurrentRenders),
+		readyCh:   make(chan struct{}),
 	}
+	close(r.readyCh)
 	r.Setup()
 	return r
 }
@@ -91,6 +99,11 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 	const maxAttempts = 5
 	result := &RenderResult{}
 	startTime := time.Now()
+
+	// Ожидаем готовности контейнера с таймаутом
+	if err := r.waitForContainerReady(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrContainerNotReady, err)
+	}
 
 	// Ограничение одновременных запросов
 	r.semaphore <- struct{}{}
@@ -132,6 +145,62 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 	}
 
 	return nil, fmt.Errorf("%w: all attempts failed for %s", ErrNotResponding, requestURL)
+}
+
+// Ожидает готовности контейнера с таймаутом
+func (r *Renderer) waitForContainerReady() error {
+	start := time.Now()
+	waitTime := 1 * time.Second
+
+	for {
+		if r.isContainerReady() {
+			return nil
+		}
+
+		if time.Since(start) > containerReadyTimeout {
+			return fmt.Errorf("timeout after %v", containerReadyTimeout)
+		}
+
+		r.logger.Warnf("Container not ready, waiting %v...", waitTime)
+		time.Sleep(waitTime)
+
+		// Экспоненциальное увеличение времени ожидания
+		waitTime *= 2
+		if waitTime > 5*time.Second {
+			waitTime = 5 * time.Second
+		}
+	}
+}
+
+// Проверяет готовность контейнера
+func (r *Renderer) isContainerReady() bool {
+	r.readyMutex.Lock()
+	defer r.readyMutex.Unlock()
+	return r.containerReady
+}
+
+// Обновляет статус готовности контейнера
+func (r *Renderer) setContainerReady(ready bool) {
+	r.readyMutex.Lock()
+	defer r.readyMutex.Unlock()
+
+	if r.containerReady != ready {
+		r.containerReady = ready
+		if ready {
+			// Сигнализируем о готовности
+			select {
+			case <-r.readyCh:
+				// Уже закрыт, создаем новый
+				r.readyCh = make(chan struct{})
+				close(r.readyCh)
+			default:
+				close(r.readyCh)
+			}
+		} else {
+			// Сбрасываем канал для ожидания
+			r.readyCh = make(chan struct{})
+		}
+	}
 }
 
 func (r *Renderer) renderPage(url string, result *RenderResult) (string, error) {
@@ -213,6 +282,7 @@ func (r *Renderer) Setup() {
 		r.wsURL = wsURL
 		r.allocatorCtx, r.cancelAllocator = chromedp.NewRemoteAllocator(context.Background(), wsURL)
 		r.isRemote = true
+		r.setContainerReady(true)
 		r.logger.Info("Connected to Chrome via remote allocator")
 	} else {
 		r.logger.Warn("Using local Chrome allocator")
@@ -223,6 +293,7 @@ func (r *Renderer) Setup() {
 		)
 		r.allocatorCtx, r.cancelAllocator = chromedp.NewExecAllocator(context.Background(), opts...)
 		r.isRemote = false
+		r.setContainerReady(true)
 	}
 }
 
@@ -234,6 +305,7 @@ func (r *Renderer) restartContainer() error {
 	defer r.setRestarting(false)
 
 	r.lastRestart = time.Now()
+	r.setContainerReady(false) // Контейнер больше не готов
 
 	r.logger.Info("Restarting container...")
 	for i := 0; i < maxRestartAttempts; i++ {
@@ -264,10 +336,13 @@ func (r *Renderer) restartContainer() error {
 		r.allocatorCtx, r.cancelAllocator = chromedp.NewRemoteAllocator(context.Background(), wsURL)
 		r.wsURL = wsURL
 		r.isRemote = true
+		r.setContainerReady(true) // Контейнер снова готов
 		r.logger.Info("Container restarted successfully")
 		return nil
 	}
 
+	// Даже если перезапуск не удался, помечаем контейнер как готовый
+	r.setContainerReady(true)
 	return ErrContainerRestart
 }
 
@@ -307,6 +382,7 @@ func (r *Renderer) setupContainer() error {
 	}
 
 	r.isStarted = true
+	r.setContainerReady(true)
 	return nil
 }
 
@@ -333,7 +409,7 @@ func (r *Renderer) getDebugURLWithRetry() (string, error) {
 		time.Sleep(delay)
 	}
 
-	return "", errors.New("failed to get debug URL after multiple attempts")
+	return "", fmt.Errorf("failed to get debug URL after %d attempts", maxAttempts)
 }
 
 func (r *Renderer) getDebugURL() (string, error) {
