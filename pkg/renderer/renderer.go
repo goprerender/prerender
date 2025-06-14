@@ -482,24 +482,62 @@ func (r *Renderer) restartContainer() error {
 				time.Sleep(2 * time.Second)
 				continue
 			}
+
+			// После перезапуска ждем и проверяем статус снова
+			time.Sleep(containerStartDelay)
+			status = r.getContainerStatus()
 		}
 
-		time.Sleep(containerStartDelay)
-
-		wsURL, err := r.getDebugURLWithRetry()
-		if err != nil {
-			r.logger.Warnf("Failed to get debug URL: %v", err)
-			continue
+		// Если контейнер запущен, пытаемся подключиться
+		if status == "running" {
+			wsURL, err := r.getDebugURLWithRetry()
+			if err != nil {
+				r.logger.Warnf("Failed to get debug URL: %v", err)
+				continue
+			}
+			r.setRemoteAllocator(wsURL)
+			r.setContainerReady(true)
+			r.logger.Info("Container restarted successfully")
+			return nil
 		}
-
-		r.setRemoteAllocator(wsURL)
-		r.setContainerReady(true)
-		r.logger.Info("Container restarted successfully")
-		return nil
 	}
 
 	r.setContainerReady(true)
 	return ErrContainerRestart
+}
+
+// getDebugURLWithRetry получает URL для отладки с повторными попытками
+func (r *Renderer) getDebugURLWithRetry() (string, error) {
+	attempt := 1
+	delay := r.debugURLRetryDelay
+	maxDelay := 10 * time.Second
+
+	for attempt <= r.debugURLMaxAttempts {
+		wsURL, err := r.getDebugURL()
+		if err == nil {
+			return wsURL, nil
+		}
+
+		r.logger.Debugf("Debug URL attempt failed (%d/%d): %v", attempt, r.debugURLMaxAttempts, err)
+
+		if attempt < r.debugURLMaxAttempts {
+			// Используем sleeper если установлен, иначе стандартный sleep
+			if r.sleeper != nil {
+				r.sleeper(delay)
+			} else {
+				time.Sleep(delay)
+			}
+
+			// Экспоненциальная задержка с ограничением
+			delay *= 2
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+		}
+		attempt++
+	}
+
+	return "", fmt.Errorf("failed to get debug URL after %d attempts", r.debugURLMaxAttempts)
 }
 
 // setRestarting устанавливает флаг перезапуска
@@ -565,38 +603,6 @@ func (r *Renderer) getContainerStatus() string {
 		return "unknown"
 	}
 	return strings.Trim(string(output), "' \n")
-}
-
-// getDebugURLWithRetry получает URL для отладки с повторными попытками
-func (r *Renderer) getDebugURLWithRetry() (string, error) {
-	maxAttempts := r.debugURLMaxAttempts
-	maxDelay := 10 * time.Second
-	delay := r.debugURLRetryDelay
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		wsURL, err := r.getDebugURL()
-		if err == nil {
-			return wsURL, nil
-		}
-
-		r.logger.Debugf("Debug URL attempt failed (%d/%d): %v", attempt, maxAttempts, err)
-
-		// Выполняем задержку только если это не последняя попытка
-		if attempt < maxAttempts {
-			if r.sleeper != nil {
-				r.sleeper(delay)
-			} else {
-				time.Sleep(delay)
-			}
-
-			delay *= 2
-			if delay > maxDelay {
-				delay = maxDelay
-			}
-		}
-	}
-
-	return "", fmt.Errorf("failed to get debug URL after %d attempts", maxAttempts)
 }
 
 // RealPortChecker реализация PortChecker для реального окружения
