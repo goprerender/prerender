@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/stretchr/testify/mock"
 	"io"
 	"net"
 	"net/http"
@@ -92,15 +91,6 @@ type PortChecker interface {
 	IsPortAvailable(port int) bool
 }
 
-// Добавляем мокированный sleeper
-type MockSleeper struct {
-	mock.Mock
-}
-
-func (m *MockSleeper) Sleep(d time.Duration) {
-	m.Called(d)
-}
-
 // Renderer структура для управления процессом рендеринга
 type Renderer struct {
 	allocatorCtx          context.Context
@@ -130,7 +120,7 @@ type Renderer struct {
 	debugURLRetryDelay    time.Duration
 	debugURLMaxAttempts   int
 	portChecker           PortChecker
-	sleeper               func(d time.Duration) // Добавляем это поле
+	sleeper               func(d time.Duration)
 }
 
 // RenderResult результат рендеринга
@@ -163,7 +153,7 @@ func NewRenderer(logger Logger, commander Commander, httpClient HTTPClient) *Ren
 		restartQueue:          make(chan struct{}, 1),
 		commander:             commander,
 		httpClient:            httpClient,
-		containerReadyTimeout: 60 * time.Second, // Значение по умолчанию
+		containerReadyTimeout: 60 * time.Second,
 		containerStartDelay:   10 * time.Second,
 		debugURLRetryDelay:    1 * time.Second,
 		debugURLMaxAttempts:   15,
@@ -176,31 +166,24 @@ func NewRenderer(logger Logger, commander Commander, httpClient HTTPClient) *Ren
 func (r *Renderer) setContainerReady(ready bool) {
 	r.readyMutex.Lock()
 	defer r.readyMutex.Unlock()
-
-	// Если состояние не изменилось, ничего не делаем
 	if r.containerReady == ready {
 		return
 	}
-
 	r.containerReady = ready
 	if ready {
-		// Устанавливаем готовность - закрываем канал только если он еще не закрыт
 		if r.readyCh != nil {
 			select {
 			case <-r.readyCh:
-				// Канал уже закрыт
 			default:
 				close(r.readyCh)
 			}
 		}
 	} else {
-		// Сбрасываем готовность - создаем новый канал
 		r.resetReadyCh()
 	}
 }
 
 func (r *Renderer) resetReadyCh() {
-	// Старый канал не закрываем, просто заменяем новым
 	r.readyCh = make(chan struct{})
 }
 
@@ -296,14 +279,12 @@ func (r *Renderer) waitForContainerReady() error {
 		}
 
 		r.logger.Warnf("Container not ready, waiting %v...", waitTime)
-		// Используем sleeper если установлен, иначе стандартный sleep
 		if r.sleeper != nil {
 			r.sleeper(waitTime)
 		} else {
 			time.Sleep(waitTime)
 		}
 
-		// Увеличиваем время ожидания с ограничением
 		newWaitTime := waitTime * 2
 		if newWaitTime > 500*time.Millisecond {
 			newWaitTime = 500 * time.Millisecond
@@ -420,7 +401,7 @@ func (r *Renderer) Setup() {
 		r.logger.Info("Connected to Chrome via remote allocator")
 	} else {
 		r.logger.Error("Failed to connect to Chrome container")
-		r.logger.Errorf("Connection error: %v", err) // Добавлено дополнительное логирование
+		r.logger.Errorf("Connection error: %v", err)
 		r.setContainerReady(false)
 	}
 }
@@ -483,12 +464,14 @@ func (r *Renderer) restartContainer() error {
 				continue
 			}
 
-			// После перезапуска ждем и проверяем статус снова
-			time.Sleep(containerStartDelay)
+			if r.sleeper != nil {
+				r.sleeper(r.containerStartDelay)
+			} else {
+				time.Sleep(r.containerStartDelay)
+			}
 			status = r.getContainerStatus()
 		}
 
-		// Если контейнер запущен, пытаемся подключиться
 		if status == "running" {
 			wsURL, err := r.getDebugURLWithRetry()
 			if err != nil {
@@ -521,14 +504,14 @@ func (r *Renderer) getDebugURLWithRetry() (string, error) {
 		r.logger.Debugf("Debug URL attempt failed (%d/%d): %v", attempt, r.debugURLMaxAttempts, err)
 
 		if attempt < r.debugURLMaxAttempts {
-			// Используем sleeper если установлен, иначе стандартный sleep
-			if r.sleeper != nil {
-				r.sleeper(delay)
-			} else {
-				time.Sleep(delay)
+			if delay > 0 { // Защита от нулевой задержки
+				if r.sleeper != nil {
+					r.sleeper(delay)
+				} else {
+					time.Sleep(delay)
+				}
 			}
 
-			// Экспоненциальная задержка с ограничением
 			delay *= 2
 			if delay > maxDelay {
 				delay = maxDelay
@@ -584,7 +567,11 @@ func (r *Renderer) setupContainer() error {
 		}
 	}
 
-	time.Sleep(r.containerStartDelay)
+	if r.sleeper != nil {
+		r.sleeper(r.containerStartDelay)
+	} else {
+		time.Sleep(r.containerStartDelay)
+	}
 	status = r.getContainerStatus()
 	if status != "running" {
 		return fmt.Errorf("container did not start, status: %s", status)
@@ -619,7 +606,7 @@ func (c *RealPortChecker) IsPortAvailable(port int) bool {
 
 // getDebugURL получает URL для отладки
 func (r *Renderer) getDebugURL() (string, error) {
-	if !r.portChecker.IsPortAvailable(9222) {
+	if r.portChecker != nil && !r.portChecker.IsPortAvailable(9222) {
 		return "", errors.New("debug port not available")
 	}
 
@@ -649,16 +636,6 @@ func (r *Renderer) getDebugURL() (string, error) {
 		return "", errors.New("empty debug URL")
 	}
 	return data.WebSocketDebuggerURL, nil
-}
-
-// isPortAvailable проверяет доступность порта
-func (r *Renderer) isPortAvailable(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), 2*time.Second)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
 }
 
 // Cancel отменяет операции рендерера

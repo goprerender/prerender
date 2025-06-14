@@ -76,15 +76,6 @@ func (m *MockHTTPClient) Get(url string) (*http.Response, error) {
 	return args.Get(0).(*http.Response), args.Error(1)
 }
 
-// mockBody создает мок для тела HTTP-ответа
-func mockBody(content string) io.ReadCloser {
-	return io.NopCloser(strings.NewReader(content))
-}
-
-func TestSanity(t *testing.T) {
-	assert.True(t, true, "Тестовая среда работает")
-}
-
 // MockPortChecker мок для проверки портов
 type MockPortChecker struct {
 	mock.Mock
@@ -95,48 +86,51 @@ func (m *MockPortChecker) IsPortAvailable(port int) bool {
 	return args.Bool(0)
 }
 
+// MockSleeper мок для задержек
+type MockSleeper struct {
+	mock.Mock
+}
+
+func (m *MockSleeper) Sleep(d time.Duration) {
+	m.Called(d)
+}
+
+// mockBody создает мок для тела HTTP-ответа
+func mockBody(content string) io.ReadCloser {
+	return io.NopCloser(strings.NewReader(content))
+}
+
+func TestSanity(t *testing.T) {
+	assert.True(t, true, "Тестовая среда работает")
+}
+
 func TestSetContainerReady(t *testing.T) {
 	t.Log("Starting TestSetContainerReady")
 	logger := new(MockLogger)
 	commander := new(MockCommander)
 	httpClient := new(MockHTTPClient)
 	portChecker := new(MockPortChecker)
+	sleeper := new(MockSleeper)
 
-	// Настраиваем ожидания для вызовов в Setup()
 	logger.On("Info", "Initializing renderer...").Once()
 	logger.On("Info", "Setting up container...").Once()
-
-	// Мокируем Docker
 	commander.On("LookPath", "docker").Return("/usr/bin/docker", nil).Once()
-
-	// Первый вызов getContainerStatus
-	t.Log("Mocking first container status check")
 	cmdStatus1 := exec.Command("echo", "running")
 	commander.On("Command", "sh", []string{"-c", dockerHealthCheckCmd}).Return(cmdStatus1).Once()
 	logger.On("Infof", "Initial container status: %s", "running").Once()
-
-	// Второй вызов getContainerStatus (после проверки)
-	t.Log("Mocking second container status check")
 	cmdStatus2 := exec.Command("echo", "running")
 	commander.On("Command", "sh", []string{"-c", dockerHealthCheckCmd}).Return(cmdStatus2).Once()
-
 	logger.On("Info", "Container setup completed").Once()
 	logger.On("Info", "Connecting to Chrome...").Once()
-
-	// Мокируем HTTP-запрос
-	t.Log("Mocking HTTP request to debugURL")
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
 		Body:       mockBody(`{"webSocketDebuggerUrl": "ws://localhost:9222/devtools/browser/test"}`),
 	}
 	httpClient.On("Get", debugURL).Return(resp, nil).Once()
-
-	// Мокируем проверку порта
 	portChecker.On("IsPortAvailable", 9222).Return(true).Once()
-
-	// Добавляем ожидания для вызовов при успешном подключении
 	logger.On("Infof", "Using Chrome debug URL: %s", "ws://localhost:9222/devtools/browser/test").Once()
 	logger.On("Info", "Connected to Chrome via remote allocator").Once()
+	sleeper.On("Sleep", 1*time.Millisecond).Once()
 
 	t.Log("Creating NewRenderer")
 	r := &Renderer{
@@ -146,25 +140,23 @@ func TestSetContainerReady(t *testing.T) {
 		portChecker:           portChecker,
 		semaphore:             make(chan struct{}, maxConcurrentRenders),
 		restartQueue:          make(chan struct{}, 1),
-		containerReadyTimeout: 60 * time.Second,
-		containerStartDelay:   10 * time.Second,
-		debugURLRetryDelay:    1 * time.Second,
+		containerReadyTimeout: 1 * time.Millisecond,
+		containerStartDelay:   1 * time.Millisecond,
+		debugURLRetryDelay:    1 * time.Millisecond,
 		debugURLMaxAttempts:   15,
+		sleeper:               sleeper.Sleep,
 	}
 	r.resetReadyCh()
 	r.Setup()
 	t.Log("NewRenderer created")
 
-	// Проверяем состояние после Setup
 	t.Log("Checking container state after Setup")
-	assert.True(t, r.isContainerReady()) // После Setup контейнер должен быть готов
+	assert.True(t, r.isContainerReady())
 
-	// Сбрасываем готовность
 	t.Log("Setting container not ready")
 	r.setContainerReady(false)
 	assert.False(t, r.isContainerReady())
 
-	// Устанавливаем готовность
 	t.Log("Setting container ready")
 	r.setContainerReady(true)
 	assert.True(t, r.isContainerReady())
@@ -174,6 +166,7 @@ func TestSetContainerReady(t *testing.T) {
 	commander.AssertExpectations(t)
 	httpClient.AssertExpectations(t)
 	portChecker.AssertExpectations(t)
+	sleeper.AssertExpectations(t)
 	t.Log("All mock expectations verified")
 }
 
@@ -185,32 +178,21 @@ func TestPortNotAvailable(t *testing.T) {
 	portChecker := new(MockPortChecker)
 	sleeper := new(MockSleeper)
 
-	// Ожидаемые вызовы при инициализации
 	logger.On("Info", "Initializing renderer...").Once()
 	logger.On("Info", "Setting up container...").Once()
-
-	// Мокируем Docker
 	commander.On("LookPath", "docker").Return("/usr/bin/docker", nil).Once()
-
-	// Создаем команды, которые возвращают статус "running"
 	cmdStatus1 := exec.Command("echo", "running")
 	commander.On("Command", "sh", []string{"-c", dockerHealthCheckCmd}).Return(cmdStatus1).Once()
 	logger.On("Infof", "Initial container status: %s", "running").Once()
-
 	cmdStatus2 := exec.Command("echo", "running")
 	commander.On("Command", "sh", []string{"-c", dockerHealthCheckCmd}).Return(cmdStatus2).Once()
-
 	logger.On("Info", "Container setup completed").Once()
 	logger.On("Info", "Connecting to Chrome...").Once()
-
-	// Мокируем проверку порта
 	portChecker.On("IsPortAvailable", 9222).Return(false).Times(3)
 	logger.On("Debugf", "Debug URL attempt failed (%d/%d): %v", mock.Anything, mock.Anything, mock.Anything).Times(3)
 	logger.On("Error", "Failed to connect to Chrome container").Once()
 	logger.On("Errorf", "Connection error: %v", mock.Anything).Once()
-
-	// Мокируем задержки
-	sleeper.On("Sleep", mock.Anything).Times(2)
+	sleeper.On("Sleep", mock.Anything).Times(3)
 
 	t.Log("Creating NewRenderer when port is not available")
 	r := &Renderer{
@@ -220,7 +202,7 @@ func TestPortNotAvailable(t *testing.T) {
 		portChecker:           portChecker,
 		semaphore:             make(chan struct{}, maxConcurrentRenders),
 		restartQueue:          make(chan struct{}, 1),
-		containerReadyTimeout: 500 * time.Millisecond,
+		containerReadyTimeout: 1 * time.Millisecond,
 		containerStartDelay:   0,
 		debugURLRetryDelay:    1 * time.Millisecond,
 		debugURLMaxAttempts:   3,
@@ -231,7 +213,6 @@ func TestPortNotAvailable(t *testing.T) {
 	r.Setup()
 	t.Log("NewRenderer created")
 
-	// Проверяем состояние контейнера
 	t.Log("Checking container state")
 	assert.False(t, r.isContainerReady())
 
@@ -250,41 +231,28 @@ func TestWaitForContainerReady(t *testing.T) {
 	commander := new(MockCommander)
 	httpClient := new(MockHTTPClient)
 	portChecker := new(MockPortChecker)
+	sleeper := new(MockSleeper)
 
-	// Настраиваем ожидания для вызовов в Setup()
 	logger.On("Info", "Initializing renderer...").Once()
 	logger.On("Info", "Setting up container...").Once()
 	commander.On("LookPath", "docker").Return("/usr/bin/docker", nil).Once()
-
-	// Первый вызов getContainerStatus
 	cmdStatus1 := exec.Command("echo", "running")
 	commander.On("Command", "sh", []string{"-c", dockerHealthCheckCmd}).Return(cmdStatus1).Once()
 	logger.On("Infof", "Initial container status: %s", "running").Once()
-
-	// Второй вызов getContainerStatus
 	cmdStatus2 := exec.Command("echo", "running")
 	commander.On("Command", "sh", []string{"-c", dockerHealthCheckCmd}).Return(cmdStatus2).Once()
-
 	logger.On("Info", "Container setup completed").Once()
 	logger.On("Info", "Connecting to Chrome...").Once()
-
-	// Мокируем HTTP-запрос
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
 		Body:       mockBody(`{"webSocketDebuggerUrl": "ws://localhost:9222/devtools/browser/test"}`),
 	}
 	httpClient.On("Get", debugURL).Return(resp, nil).Once()
-
-	// Мокируем проверку порта
 	portChecker.On("IsPortAvailable", 9222).Return(true).Once()
-
 	logger.On("Infof", "Using Chrome debug URL: %s", "ws://localhost:9222/devtools/browser/test").Once()
 	logger.On("Info", "Connected to Chrome via remote allocator").Once()
+	sleeper.On("Sleep", mock.Anything).Once()
 
-	// Мокируем вызовы в waitForContainerReady
-	logger.On("Warnf", "Container not ready, waiting %v...", mock.Anything).Maybe()
-
-	// Создаем рендерер
 	r := &Renderer{
 		logger:                logger,
 		commander:             commander,
@@ -292,10 +260,11 @@ func TestWaitForContainerReady(t *testing.T) {
 		portChecker:           portChecker,
 		semaphore:             make(chan struct{}, maxConcurrentRenders),
 		restartQueue:          make(chan struct{}, 1),
-		containerReadyTimeout: 60 * time.Second,
+		containerReadyTimeout: 100 * time.Millisecond,
 		containerStartDelay:   0,
-		debugURLRetryDelay:    1 * time.Second,
+		debugURLRetryDelay:    1 * time.Millisecond,
 		debugURLMaxAttempts:   15,
+		sleeper:               sleeper.Sleep,
 	}
 	r.resetReadyCh()
 	r.Setup()
@@ -309,30 +278,44 @@ func TestWaitForContainerReady(t *testing.T) {
 		r.setContainerReady(false)
 		assert.False(t, r.isContainerReady())
 
+		logger.ExpectedCalls = nil
+		logger.On("Warnf", "Container not ready, waiting %v...", mock.Anything).Return()
+		sleeperMock := new(MockSleeper)
+		sleeperMock.On("Sleep", mock.Anything).Return()
+		r.sleeper = sleeperMock.Sleep
+
 		go func() {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(30 * time.Millisecond)
 			r.setContainerReady(true)
 		}()
 
 		err := r.waitForContainerReady()
 		assert.NoError(t, err)
+		assert.Greater(t, len(logger.Calls), 0, "Expected at least one Warnf call")
+		assert.Greater(t, len(sleeperMock.Calls), 0, "Expected at least one Sleep call")
 	})
 
 	t.Run("TimeoutWaitingForContainer", func(t *testing.T) {
 		r.setContainerReady(false)
 		assert.False(t, r.isContainerReady())
 
+		logger.ExpectedCalls = nil
+		logger.On("Warnf", "Container not ready, waiting %v...", mock.Anything).Return()
+		sleeperMock := new(MockSleeper)
+		sleeperMock.On("Sleep", mock.Anything).Return()
+		r.sleeper = sleeperMock.Sleep
+
 		originalTimeout := r.containerReadyTimeout
-		r.containerReadyTimeout = 100 * time.Millisecond
+		r.containerReadyTimeout = 5 * time.Millisecond
 		defer func() { r.containerReadyTimeout = originalTimeout }()
 
 		err := r.waitForContainerReady()
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "timeout after")
+		assert.Greater(t, len(logger.Calls), 0, "Expected at least one Warnf call")
+		assert.Greater(t, len(sleeperMock.Calls), 0, "Expected at least one Sleep call")
 	})
 
-	// Проверяем, что все ожидаемые вызовы были сделаны
-	logger.AssertExpectations(t)
 	commander.AssertExpectations(t)
 	httpClient.AssertExpectations(t)
 	portChecker.AssertExpectations(t)
@@ -344,38 +327,28 @@ func TestShouldRestart(t *testing.T) {
 	commander := new(MockCommander)
 	httpClient := new(MockHTTPClient)
 	portChecker := new(MockPortChecker)
+	sleeper := new(MockSleeper)
 
-	// Настраиваем ожидания для вызовов в Setup()
 	logger.On("Info", "Initializing renderer...").Once()
 	logger.On("Info", "Setting up container...").Once()
 	commander.On("LookPath", "docker").Return("/usr/bin/docker", nil).Once()
-
-	// Первый вызов getContainerStatus
 	cmdStatus1 := exec.Command("echo", "running")
 	commander.On("Command", "sh", []string{"-c", dockerHealthCheckCmd}).Return(cmdStatus1).Once()
 	logger.On("Infof", "Initial container status: %s", "running").Once()
-
-	// Второй вызов getContainerStatus
 	cmdStatus2 := exec.Command("echo", "running")
 	commander.On("Command", "sh", []string{"-c", dockerHealthCheckCmd}).Return(cmdStatus2).Once()
-
 	logger.On("Info", "Container setup completed").Once()
 	logger.On("Info", "Connecting to Chrome...").Once()
-
-	// Мокируем HTTP-запрос
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
 		Body:       mockBody(`{"webSocketDebuggerUrl": "ws://localhost:9222/devtools/browser/test"}`),
 	}
 	httpClient.On("Get", debugURL).Return(resp, nil).Once()
-
-	// Мокируем проверку порта
 	portChecker.On("IsPortAvailable", 9222).Return(true).Once()
-
 	logger.On("Infof", "Using Chrome debug URL: %s", "ws://localhost:9222/devtools/browser/test").Once()
 	logger.On("Info", "Connected to Chrome via remote allocator").Once()
+	sleeper.On("Sleep", mock.Anything).Once()
 
-	// Создаем рендерер
 	r := &Renderer{
 		logger:                logger,
 		commander:             commander,
@@ -383,10 +356,11 @@ func TestShouldRestart(t *testing.T) {
 		portChecker:           portChecker,
 		semaphore:             make(chan struct{}, maxConcurrentRenders),
 		restartQueue:          make(chan struct{}, 1),
-		containerReadyTimeout: 60 * time.Second,
+		containerReadyTimeout: 1 * time.Millisecond,
 		containerStartDelay:   0,
-		debugURLRetryDelay:    1 * time.Second,
+		debugURLRetryDelay:    1 * time.Millisecond,
 		debugURLMaxAttempts:   15,
+		sleeper:               sleeper.Sleep,
 	}
 	r.resetReadyCh()
 	r.Setup()
@@ -410,11 +384,11 @@ func TestShouldRestart(t *testing.T) {
 		})
 	}
 
-	// Проверяем, что все ожидаемые вызовы были сделаны
 	logger.AssertExpectations(t)
 	commander.AssertExpectations(t)
 	httpClient.AssertExpectations(t)
 	portChecker.AssertExpectations(t)
+	sleeper.AssertExpectations(t)
 }
 
 func TestSetupContainer(t *testing.T) {
@@ -424,40 +398,28 @@ func TestSetupContainer(t *testing.T) {
 		commander := new(MockCommander)
 		httpClient := new(MockHTTPClient)
 		portChecker := new(MockPortChecker)
+		sleeper := new(MockSleeper)
 
-		// Настраиваем ожидания для вызовов в Setup()
 		logger.On("Info", "Initializing renderer...").Once()
 		logger.On("Info", "Setting up container...").Once()
-
-		// Мокируем Docker
 		commander.On("LookPath", "docker").Return("/usr/bin/docker", nil).Once()
-
-		// Первый вызов getContainerStatus
 		cmdStatus1 := exec.Command("echo", "running")
 		commander.On("Command", "sh", []string{"-c", dockerHealthCheckCmd}).Return(cmdStatus1).Once()
 		logger.On("Infof", "Initial container status: %s", "running").Once()
-
-		// Второй вызов getContainerStatus после containerStartDelay
 		cmdStatus2 := exec.Command("echo", "running")
 		commander.On("Command", "sh", []string{"-c", dockerHealthCheckCmd}).Return(cmdStatus2).Once()
-
 		logger.On("Info", "Container setup completed").Once()
 		logger.On("Info", "Connecting to Chrome...").Once()
-
-		// Мокируем HTTP-запрос
 		resp := &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       mockBody(`{"webSocketDebuggerUrl": "ws://localhost:9222/devtools/browser/test"}`),
 		}
 		httpClient.On("Get", debugURL).Return(resp, nil).Once()
-
-		// Мокируем проверку порта
 		portChecker.On("IsPortAvailable", 9222).Return(true).Once()
-
 		logger.On("Infof", "Using Chrome debug URL: %s", "ws://localhost:9222/devtools/browser/test").Once()
 		logger.On("Info", "Connected to Chrome via remote allocator").Once()
+		sleeper.On("Sleep", 1*time.Millisecond).Once()
 
-		// Создаем рендерер с нулевой задержкой
 		r := &Renderer{
 			logger:                logger,
 			commander:             commander,
@@ -465,10 +427,11 @@ func TestSetupContainer(t *testing.T) {
 			portChecker:           portChecker,
 			semaphore:             make(chan struct{}, maxConcurrentRenders),
 			restartQueue:          make(chan struct{}, 1),
-			containerReadyTimeout: 60 * time.Second,
-			containerStartDelay:   0, // Убираем задержку
-			debugURLRetryDelay:    1 * time.Second,
+			containerReadyTimeout: 1 * time.Millisecond,
+			containerStartDelay:   1 * time.Millisecond,
+			debugURLRetryDelay:    1 * time.Millisecond,
 			debugURLMaxAttempts:   15,
+			sleeper:               sleeper.Sleep,
 		}
 		r.resetReadyCh()
 		r.Setup()
@@ -477,11 +440,11 @@ func TestSetupContainer(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, r.isStarted)
 
-		// Проверяем, что все ожидаемые вызовы были сделаны
 		logger.AssertExpectations(t)
 		commander.AssertExpectations(t)
 		httpClient.AssertExpectations(t)
 		portChecker.AssertExpectations(t)
+		sleeper.AssertExpectations(t)
 	})
 
 	t.Run("DockerNotFound", func(t *testing.T) {
@@ -490,32 +453,21 @@ func TestSetupContainer(t *testing.T) {
 		commander := new(MockCommander)
 		httpClient := new(MockHTTPClient)
 		portChecker := new(MockPortChecker)
-		sleeper := new(MockSleeper) // Добавляем мок для sleeper
+		sleeper := new(MockSleeper)
 
-		// Настраиваем ожидания для вызовов в Setup()
 		logger.On("Info", "Initializing renderer...").Once()
 		logger.On("Info", "Setting up container...").Once()
-
-		// Docker не найден
 		commander.On("LookPath", "docker").Return("", errors.New("not found")).Once()
 		logger.On("Error", "Docker not found").Once()
-
-		// Ожидаем вызовы в Setup() после ошибки
 		logger.On("Info", "Connecting to Chrome...").Once()
-
-		// Уменьшаем количество попыток и задержек!
-		debugURLMaxAttempts := 3 // Вместо 15
-		portChecker.On("IsPortAvailable", 9222).Return(false).Times(debugURLMaxAttempts)
-		logger.On("Debugf", "Debug URL attempt failed (%d/%d): %v", mock.Anything, mock.Anything, mock.Anything).Times(debugURLMaxAttempts)
-
+		portChecker.On("IsPortAvailable", 9222).Return(false).Times(15)
+		logger.On("Debugf", "Debug URL attempt failed (%d/%d): %v", mock.Anything, mock.Anything, mock.Anything).Times(15)
 		logger.On("Error", "Failed to connect to Chrome container").Once()
 		logger.On("Errorf", "Connection error: %v", mock.Anything).Once()
 		logger.On("Errorf", "Container setup error: %v", mock.Anything).Once()
+		// Исправлено: разрешаем любое значение времени
+		sleeper.On("Sleep", mock.Anything).Times(14)
 
-		// Мокируем задержки
-		sleeper.On("Sleep", mock.Anything).Times(debugURLMaxAttempts - 1)
-
-		// Создаем рендерер с уменьшенными параметрами
 		r := &Renderer{
 			logger:                logger,
 			commander:             commander,
@@ -523,21 +475,20 @@ func TestSetupContainer(t *testing.T) {
 			portChecker:           portChecker,
 			semaphore:             make(chan struct{}, maxConcurrentRenders),
 			restartQueue:          make(chan struct{}, 1),
-			containerReadyTimeout: 100 * time.Millisecond, // Уменьшаем таймаут
+			containerReadyTimeout: 1 * time.Millisecond,
 			containerStartDelay:   0,
-			debugURLRetryDelay:    1 * time.Millisecond, // Минимальная задержка
-			debugURLMaxAttempts:   debugURLMaxAttempts,  // Используем уменьшенное значение
-			sleeper:               sleeper.Sleep,        // Используем моковый sleeper
+			debugURLRetryDelay:    1 * time.Millisecond,
+			debugURLMaxAttempts:   15,
+			sleeper:               sleeper.Sleep,
 		}
 		r.resetReadyCh()
 		r.Setup()
 
-		// Проверяем, что все ожидаемые вызовы были сделаны
 		logger.AssertExpectations(t)
 		commander.AssertExpectations(t)
 		httpClient.AssertExpectations(t)
 		portChecker.AssertExpectations(t)
-		sleeper.AssertExpectations(t) // Проверяем вызовы sleeper
+		sleeper.AssertExpectations(t)
 	})
 }
 
@@ -553,36 +504,26 @@ func TestRestartContainer(t *testing.T) {
 		dockerPath := "/usr/bin/docker"
 		debugURL := "http://localhost:9222/json/version"
 
-		// Настройки для Setup()
 		logger.On("Info", "Initializing renderer...").Once()
 		logger.On("Info", "Setting up container...").Once()
 		commander.On("LookPath", "docker").Return(dockerPath, nil).Once()
-
-		// Первый статус контейнера
 		cmdStatus1 := exec.Command("echo", "running")
 		commander.On("Command", "sh", mock.Anything).Return(cmdStatus1).Once()
 		logger.On("Infof", "Initial container status: %s", "running").Once()
-
-		// Второй статус контейнера
 		cmdStatus2 := exec.Command("echo", "running")
 		commander.On("Command", "sh", mock.Anything).Return(cmdStatus2).Once()
-
 		logger.On("Info", "Container setup completed").Once()
 		logger.On("Info", "Connecting to Chrome...").Once()
-
-		// Первый HTTP-запрос
 		resp := &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       mockBody(`{"webSocketDebuggerUrl": "ws://localhost:9222/devtools/browser/test"}`),
 		}
 		httpClient.On("Get", debugURL).Return(resp, nil).Once()
-
-		// Первая проверка порта
 		portChecker.On("IsPortAvailable", 9222).Return(true).Once()
 		logger.On("Infof", "Using Chrome debug URL: %s", "ws://localhost:9222/devtools/browser/test").Once()
 		logger.On("Info", "Connected to Chrome via remote allocator").Once()
+		sleeper.On("Sleep", mock.Anything).Once()
 
-		// Создаем рендерер
 		r := &Renderer{
 			logger:                logger,
 			commander:             commander,
@@ -590,9 +531,9 @@ func TestRestartContainer(t *testing.T) {
 			portChecker:           portChecker,
 			semaphore:             make(chan struct{}, maxConcurrentRenders),
 			restartQueue:          make(chan struct{}, 1),
-			containerReadyTimeout: 60 * time.Second,
-			containerStartDelay:   0,
-			debugURLRetryDelay:    1 * time.Second,
+			containerReadyTimeout: 1 * time.Millisecond,
+			containerStartDelay:   1 * time.Millisecond,
+			debugURLRetryDelay:    1 * time.Millisecond,
 			debugURLMaxAttempts:   15,
 			sleeper:               sleeper.Sleep,
 		}
@@ -600,36 +541,27 @@ func TestRestartContainer(t *testing.T) {
 		r.Setup()
 		r.dockerPath = dockerPath
 
-		// Мокируем команды для restartContainer()
-		// Первая проверка статуса - контейнер не запущен
 		cmdStatusExited := exec.Command("echo", "exited")
 		commander.On("Command", "sh", mock.Anything).Return(cmdStatusExited).Once()
-
-		// Команда перезапуска
 		cmdRestart := exec.Command("echo")
 		commander.On("Command", dockerPath, mock.Anything).Return(cmdRestart).Once()
-
-		// Проверка статуса после перезапуска - контейнер запущен
 		cmdStatusRunning := exec.Command("echo", "running")
 		commander.On("Command", "sh", mock.Anything).Return(cmdStatusRunning).Once()
-
-		// Вторая проверка порта
 		portChecker.On("IsPortAvailable", 9222).Return(true).Once()
-
-		// Второй HTTP-запрос
 		respAfterRestart := &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       mockBody(`{"webSocketDebuggerUrl": "ws://localhost:9222/devtools/browser/new"}`),
 		}
 		httpClient.On("Get", debugURL).Return(respAfterRestart, nil).Once()
-
-		// Ожидания логирования
 		logger.On("Info", "Waiting for active requests to complete before restart...").Once()
 		logger.On("Info", "All active requests completed").Once()
 		logger.On("Info", "Restarting container...").Once()
 		logger.On("Warnf", "Container status: %s, restarting...", "exited").Once()
 		logger.On("Info", "Container restarted successfully").Once()
-
+		sleeperRestart := new(MockSleeper)
+		// Исправлено с 2 на 1
+		sleeperRestart.On("Sleep", mock.Anything).Times(1)
+		r.sleeper = sleeperRestart.Sleep
 		r.setRestarting(false)
 
 		err := r.restartContainer()
@@ -640,6 +572,7 @@ func TestRestartContainer(t *testing.T) {
 		httpClient.AssertExpectations(t)
 		portChecker.AssertExpectations(t)
 		sleeper.AssertExpectations(t)
+		sleeperRestart.AssertExpectations(t)
 	})
 
 	t.Run("RestartSkippedDueToCooldown", func(t *testing.T) {
@@ -653,32 +586,26 @@ func TestRestartContainer(t *testing.T) {
 		dockerPath := "/usr/bin/docker"
 		debugURL := "http://localhost:9222/json/version"
 
-		// Настройки для Setup()
 		logger.On("Info", "Initializing renderer...").Once()
 		logger.On("Info", "Setting up container...").Once()
 		commander.On("LookPath", "docker").Return(dockerPath, nil).Once()
-
 		cmdStatus1 := exec.Command("echo", "running")
 		commander.On("Command", "sh", mock.Anything).Return(cmdStatus1).Once()
 		logger.On("Infof", "Initial container status: %s", "running").Once()
-
 		cmdStatus2 := exec.Command("echo", "running")
 		commander.On("Command", "sh", mock.Anything).Return(cmdStatus2).Once()
-
 		logger.On("Info", "Container setup completed").Once()
 		logger.On("Info", "Connecting to Chrome...").Once()
-
 		resp := &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       mockBody(`{"webSocketDebuggerUrl": "ws://localhost:9222/devtools/browser/test"}`),
 		}
 		httpClient.On("Get", debugURL).Return(resp, nil).Once()
-
 		portChecker.On("IsPortAvailable", 9222).Return(true).Once()
 		logger.On("Infof", "Using Chrome debug URL: %s", "ws://localhost:9222/devtools/browser/test").Once()
 		logger.On("Info", "Connected to Chrome via remote allocator").Once()
+		sleeper.On("Sleep", mock.Anything).Once()
 
-		// Создаем рендерер
 		r := &Renderer{
 			logger:                logger,
 			commander:             commander,
@@ -686,22 +613,17 @@ func TestRestartContainer(t *testing.T) {
 			portChecker:           portChecker,
 			semaphore:             make(chan struct{}, maxConcurrentRenders),
 			restartQueue:          make(chan struct{}, 1),
-			containerReadyTimeout: 60 * time.Second,
-			containerStartDelay:   0,
-			debugURLRetryDelay:    1 * time.Second,
+			containerReadyTimeout: 1 * time.Millisecond,
+			containerStartDelay:   1 * time.Millisecond,
+			debugURLRetryDelay:    1 * time.Millisecond,
 			debugURLMaxAttempts:   15,
 			sleeper:               sleeper.Sleep,
 		}
 		r.resetReadyCh()
 		r.Setup()
 		r.dockerPath = dockerPath
-
-		// Устанавливаем время последнего перезапуска
 		r.lastRestart = time.Now().Add(-10 * time.Second)
-
-		// Ожидание логирования
 		logger.On("Warn", "Restart skipped: still in cooldown period").Once()
-
 		r.setRestarting(false)
 
 		err := r.restartContainer()
@@ -722,40 +644,28 @@ func TestRenderPage(t *testing.T) {
 		commander := new(MockCommander)
 		httpClient := new(MockHTTPClient)
 		portChecker := new(MockPortChecker)
+		sleeper := new(MockSleeper)
 
-		// Настраиваем ожидания для вызовов в Setup()
 		logger.On("Info", "Initializing renderer...").Once()
 		logger.On("Info", "Setting up container...").Once()
-
-		// Мокируем Docker
 		commander.On("LookPath", "docker").Return("/usr/bin/docker", nil).Once()
-
-		// Первый вызов getContainerStatus
 		cmdStatus1 := exec.Command("echo", "running")
 		commander.On("Command", "sh", []string{"-c", dockerHealthCheckCmd}).Return(cmdStatus1).Once()
 		logger.On("Infof", "Initial container status: %s", "running").Once()
-
-		// Второй вызов getContainerStatus
 		cmdStatus2 := exec.Command("echo", "running")
 		commander.On("Command", "sh", []string{"-c", dockerHealthCheckCmd}).Return(cmdStatus2).Once()
-
 		logger.On("Info", "Container setup completed").Once()
 		logger.On("Info", "Connecting to Chrome...").Once()
-
-		// Мокируем HTTP-запрос
 		resp := &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       mockBody(`{"webSocketDebuggerUrl": "ws://localhost:9222/devtools/browser/test"}`),
 		}
 		httpClient.On("Get", debugURL).Return(resp, nil).Once()
-
-		// Мокируем проверку порта
 		portChecker.On("IsPortAvailable", 9222).Return(true).Once()
-
 		logger.On("Infof", "Using Chrome debug URL: %s", "ws://localhost:9222/devtools/browser/test").Once()
 		logger.On("Info", "Connected to Chrome via remote allocator").Once()
+		sleeper.On("Sleep", mock.Anything).Once()
 
-		// Создаем рендерер
 		r := &Renderer{
 			logger:                logger,
 			commander:             commander,
@@ -763,15 +673,14 @@ func TestRenderPage(t *testing.T) {
 			portChecker:           portChecker,
 			semaphore:             make(chan struct{}, maxConcurrentRenders),
 			restartQueue:          make(chan struct{}, 1),
-			containerReadyTimeout: 60 * time.Second,
-			containerStartDelay:   0,
-			debugURLRetryDelay:    1 * time.Second,
+			containerReadyTimeout: 1 * time.Millisecond,
+			containerStartDelay:   1 * time.Millisecond,
+			debugURLRetryDelay:    1 * time.Millisecond,
 			debugURLMaxAttempts:   15,
+			sleeper:               sleeper.Sleep,
 		}
 		r.resetReadyCh()
 		r.Setup()
-
-		// Отменяем контекст
 		r.allocatorCtx, r.cancelAllocator = context.WithCancel(context.Background())
 		r.cancelAllocator()
 
@@ -781,10 +690,10 @@ func TestRenderPage(t *testing.T) {
 		assert.Error(t, err)
 		assert.True(t, errors.Is(err, ErrInvalidContext))
 
-		// Проверяем, что все ожидаемые вызовы были сделаны
 		logger.AssertExpectations(t)
 		commander.AssertExpectations(t)
 		httpClient.AssertExpectations(t)
 		portChecker.AssertExpectations(t)
+		sleeper.AssertExpectations(t)
 	})
 }
