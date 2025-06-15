@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chromedp/cdproto/network"
@@ -133,12 +134,11 @@ type Renderer struct {
 	readyCh               chan struct{}
 	readyMutex            sync.Mutex
 	containerReady        bool
-	activeRequests        sync.WaitGroup
 	restartQueue          chan struct{}
 	allocatorMutex        sync.RWMutex
 	commander             Commander
 	httpClient            HTTPClient
-	ContainerReadyTimeout time.Duration
+	containerReadyTimeout time.Duration
 	containerStartDelay   time.Duration
 	debugURLRetryDelay    time.Duration
 	debugURLMaxAttempts   int
@@ -146,6 +146,7 @@ type Renderer struct {
 	sleeper               func(d time.Duration)
 	pageRenderer          PageRenderer // Стратегия рендеринга страниц
 	allocatorCreator      AllocatorCreator
+	activeRequests        int32 // Используем атомарный счетчик
 }
 
 // RenderResult результат рендеринга
@@ -180,7 +181,7 @@ func NewRenderer(logger Logger, commander Commander, httpClient HTTPClient) *Ren
 		restartQueue:          make(chan struct{}, 1),
 		commander:             commander,
 		httpClient:            httpClient,
-		ContainerReadyTimeout: containerReadyTimeout,
+		containerReadyTimeout: containerReadyTimeout,
 		containerStartDelay:   containerStartDelay,
 		debugURLRetryDelay:    1 * time.Second,
 		debugURLMaxAttempts:   20,
@@ -239,8 +240,9 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 	r.semaphore <- struct{}{}
 	defer func() { <-r.semaphore }()
 
-	r.activeRequests.Add(1)
-	defer r.activeRequests.Done()
+	// Увеличиваем счетчик активных запросов
+	atomic.AddInt32(&r.activeRequests, 1)
+	defer atomic.AddInt32(&r.activeRequests, -1)
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if r.isRestarting() {
@@ -249,6 +251,8 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 				r.logger.Warnf("Container restart in progress, waiting %v... (attempt %d/%d)", waitTime, attempt, maxAttempts)
 				select {
 				case <-time.After(waitTime):
+					// Сбрасываем флаг после ожидания
+					r.setRestarting(false)
 				case <-r.readyCh:
 				}
 			}
@@ -364,8 +368,8 @@ func (r *Renderer) waitForContainerReady() error {
 			return nil
 		}
 
-		if time.Since(start) > r.ContainerReadyTimeout {
-			return fmt.Errorf("timeout after %v", r.ContainerReadyTimeout)
+		if time.Since(start) > r.containerReadyTimeout {
+			return fmt.Errorf("timeout after %v", r.containerReadyTimeout)
 		}
 
 		r.logger.Warnf("Container not ready, waiting %v...", waitTime)
@@ -458,6 +462,20 @@ func (r *Renderer) Setup() {
 	}
 }
 
+func (r *Renderer) SetContainerReadyTimeout(timeout time.Duration) {
+	r.containerReadyTimeout = timeout
+}
+
+func (r *Renderer) SetDebugURLMaxAttempts(attempts int) {
+	r.debugURLMaxAttempts = attempts
+}
+
+func (r *Renderer) IsContainerReady() bool {
+	r.readyMutex.Lock()
+	defer r.readyMutex.Unlock()
+	return r.containerReady
+}
+
 // setRemoteAllocator устанавливает удаленный аллокатор
 func (r *Renderer) setRemoteAllocator(wsURL string) {
 	r.allocatorMutex.Lock()
@@ -467,11 +485,8 @@ func (r *Renderer) setRemoteAllocator(wsURL string) {
 		r.cancelAllocator()
 	}
 
-	// Используем таймаут для создания аллокатора
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	allocatorCtx, cancelAlloc := r.allocatorCreator.CreateRemoteAllocator(ctx, wsURL)
+	// Используем контекст без таймаута для создания аллокатора
+	allocatorCtx, cancelAlloc := r.allocatorCreator.CreateRemoteAllocator(context.Background(), wsURL)
 	r.allocatorCtx = allocatorCtx
 	r.cancelAllocator = cancelAlloc
 	r.wsURL = wsURL
@@ -495,36 +510,60 @@ func (r *Renderer) restartContainer() error {
 	r.setContainerReady(false)
 
 	r.logger.Info("Waiting for active requests to complete before restart...")
-	done := make(chan struct{})
-	go func() {
-		r.activeRequests.Wait()
-		close(done)
-	}()
 
-	select {
-	case <-done:
-		r.logger.Info("All active requests completed")
-	case <-time.After(30 * time.Second):
-		r.logger.Warn("Timeout waiting for active requests, proceeding with restart")
+	// Ожидаем завершения активных запросов с таймаутом
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	completed := false
+	for !completed {
+		select {
+		case <-ctx.Done():
+			r.logger.Warn("Timeout waiting for active requests, proceeding with restart")
+			completed = true
+		case <-ticker.C:
+			// Проверяем количество активных запросов, исключая текущий (который инициировал перезапуск)
+			if atomic.LoadInt32(&r.activeRequests) == 1 {
+				r.logger.Info("All active requests completed")
+				completed = true
+			}
+		}
 	}
 
 	r.logger.Info("Restarting container...")
 	for i := 0; i < maxRestartAttempts; i++ {
 		status := r.getContainerStatus()
+		if status == "running" {
+			// Убираем повторную проверку статуса
+			wsURL, err := r.getDebugURLWithRetry()
+			if err == nil {
+				r.setRemoteAllocator(wsURL)
+				r.setContainerReady(true)
+				return nil
+			}
+		}
+
+		// Если контейнер не запущен, выполняем перезапуск
 		if status != "running" {
 			r.logger.Warnf("Container status: %s, restarting...", status)
 			cmd := r.commander.Command(r.dockerPath, "restart", containerName)
 			if output, err := cmd.CombinedOutput(); err != nil {
-				r.logger.Errorf("Restart failed: %s", output)
+				r.logger.Errorf("Restart failed: %s", string(output))
 				time.Sleep(2 * time.Second)
 				continue
 			}
 
+			// Даем контейнеру время на запуск
 			if r.sleeper != nil {
 				r.sleeper(r.containerStartDelay)
 			} else {
 				time.Sleep(r.containerStartDelay)
 			}
+
+			// Проверяем статус после перезапуска
 			status = r.getContainerStatus()
 		}
 
