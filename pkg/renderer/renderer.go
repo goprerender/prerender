@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	rt "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -197,6 +198,15 @@ func (r *Renderer) SetPageRenderer(pr PageRenderer) {
 	r.pageRenderer = pr
 }
 
+func (r *Renderer) SetConcurrencyLimit(limit int) {
+	r.semaphore = make(chan struct{}, limit)
+}
+
+// SetPortChecker устанавливает PortChecker
+func (r *Renderer) SetPortChecker(pc PortChecker) {
+	r.portChecker = pc
+}
+
 func (r *Renderer) setContainerReady(ready bool) {
 	r.readyMutex.Lock()
 	defer r.readyMutex.Unlock()
@@ -232,6 +242,11 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 	result := &RenderResult{}
 	startTime := time.Now()
 
+	// Проверяем валидность URL
+	if !isValidURL(requestURL) {
+		return nil, fmt.Errorf("invalid URL: %s", requestURL)
+	}
+
 	if err := r.waitForContainerReady(); err != nil {
 		r.logger.Errorf("Container not ready: %v", err)
 		return nil, fmt.Errorf("%w: %v", ErrContainerNotReady, err)
@@ -240,7 +255,6 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 	r.semaphore <- struct{}{}
 	defer func() { <-r.semaphore }()
 
-	// Увеличиваем счетчик активных запросов
 	atomic.AddInt32(&r.activeRequests, 1)
 	defer atomic.AddInt32(&r.activeRequests, -1)
 
@@ -251,7 +265,6 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 				r.logger.Warnf("Container restart in progress, waiting %v... (attempt %d/%d)", waitTime, attempt, maxAttempts)
 				select {
 				case <-time.After(waitTime):
-					// Сбрасываем флаг после ожидания
 					r.setRestarting(false)
 				case <-r.readyCh:
 				}
@@ -301,11 +314,16 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 	return nil, fmt.Errorf("%w: all attempts failed for %s", ErrNotResponding, requestURL)
 }
 
+// Вспомогательная функция для проверки URL
+func isValidURL(url string) bool {
+	return strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
+}
+
 // RenderPage реализация PageRenderer для рендеринга страниц
 func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) {
-	// Добавляем специальный URL для тестирования перезапуска
+	// Специальный URL для тестирования перезапуска контейнера
 	if url == "https://invalid-url-that-triggers-restart" {
-		return "", errors.New("artificial error: could not dial \"ws:") // Ошибка, требующая перезапуска
+		return "", errors.New("artificial error: could not dial \"ws:")
 	}
 
 	r.allocatorMutex.RLock()
@@ -340,7 +358,9 @@ func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) 
 			}
 			return nil
 		}),
-		chromedp.Sleep(500 * time.Millisecond),
+		// Добавляем проверку загрузки страницы
+		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.Sleep(1 * time.Second), // Дополнительное время для JS
 		chromedp.OuterHTML("html", &htmlContent, chromedp.ByQuery),
 	}
 
@@ -530,7 +550,6 @@ func (r *Renderer) restartContainer() error {
 			r.logger.Warn("Timeout waiting for active requests, proceeding with restart")
 			completed = true
 		case <-ticker.C:
-			// Проверяем количество активных запросов, исключая текущий (который инициировал перезапуск)
 			if atomic.LoadInt32(&r.activeRequests) == 1 {
 				r.logger.Info("All active requests completed")
 				completed = true
@@ -539,54 +558,84 @@ func (r *Renderer) restartContainer() error {
 	}
 
 	r.logger.Info("Restarting container...")
-	for i := 0; i < maxRestartAttempts; i++ {
-		status := r.getContainerStatus()
-		if status == "running" {
-			// Убираем повторную проверку статуса
-			wsURL, err := r.getDebugURLWithRetry()
-			if err == nil {
-				r.setRemoteAllocator(wsURL)
-				r.setContainerReady(true)
-				return nil
-			}
-		}
 
-		// Если контейнер не запущен, выполняем перезапуск
-		if status != "running" {
-			r.logger.Warnf("Container status: %s, restarting...", status)
-			cmd := r.commander.Command(r.dockerPath, "restart", containerName)
-			if output, err := cmd.CombinedOutput(); err != nil {
-				r.logger.Errorf("Restart failed: %s", string(output))
-				time.Sleep(2 * time.Second)
-				continue
+	// ЗАМЕНА БЛОКА ОЧИСТКИ ПОРТА:
+	if r.portChecker != nil && !r.portChecker.IsPortAvailable(9222) {
+		r.logger.Warn("Debug port 9222 is busy, attempting to kill processes...")
+		if rt.GOOS != "windows" {
+			cmd := r.commander.Command("fuser", "-k", "9222/tcp")
+			if err := cmd.Run(); err != nil {
+				r.logger.Errorf("Failed to kill processes: %v", err)
 			}
-
-			// Даем контейнеру время на запуск
-			if r.sleeper != nil {
-				r.sleeper(r.containerStartDelay)
-			} else {
-				time.Sleep(r.containerStartDelay)
-			}
-
-			// Проверяем статус после перезапуска
-			status = r.getContainerStatus()
-		}
-
-		if status == "running" {
-			wsURL, err := r.getDebugURLWithRetry()
-			if err != nil {
-				r.logger.Warnf("Failed to get debug URL: %v", err)
-				continue
-			}
-			r.setRemoteAllocator(wsURL)
-			r.setContainerReady(true)
-			r.logger.Info("Container restarted successfully")
-			return nil
+		} else {
+			r.logger.Warn("Automatic port cleanup not supported on Windows")
 		}
 	}
 
-	r.setContainerReady(true)
+	for i := 0; i < maxRestartAttempts; i++ {
+		// Принудительно останавливаем контейнер перед запуском
+		cmd := r.commander.Command(r.dockerPath, "stop", containerName)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			r.logger.Warnf("Force stop failed: %s", string(output))
+		}
+
+		// Запускаем контейнер
+		cmd = r.commander.Command(r.dockerPath, "start", containerName)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			r.logger.Errorf("Start failed: %s", string(output))
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		// Увеличиваем время ожидания готовности Chrome
+		r.logger.Info("Waiting for Chrome to initialize...")
+		time.Sleep(10 * time.Second)
+
+		// Проверяем статус контейнера
+		status := r.getContainerStatus()
+		if status != "running" {
+			r.logger.Warnf("Container status after start: %s, retrying...", status)
+			continue
+		}
+
+		// Получаем новый debug URL
+		wsURL, err := r.getDebugURLWithRetry()
+		if err != nil {
+			r.logger.Warnf("Failed to get debug URL: %v", err)
+			continue
+		}
+
+		// Устанавливаем новый аллокатор
+		r.setRemoteAllocator(wsURL)
+		r.setContainerReady(true)
+
+		// Проверяем работоспособность
+		if err := r.verifyChromeConnection(); err == nil {
+			r.logger.Info("Container restarted and verified successfully")
+			return nil
+		} else {
+			r.logger.Warnf("Chrome verification failed: %v", err)
+		}
+	}
+
 	return ErrContainerRestart
+}
+
+// Новая функция для проверки соединения
+func (r *Renderer) verifyChromeConnection() error {
+	testCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var res string
+	err := chromedp.Run(testCtx,
+		chromedp.Navigate("about:blank"),
+		chromedp.OuterHTML("html", &res),
+	)
+
+	if err != nil || res == "" {
+		return fmt.Errorf("chrome connection test failed: %w", err)
+	}
+	return nil
 }
 
 // getDebugURLWithRetry получает URL для отладки с повторными попытками
