@@ -303,6 +303,11 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 
 // RenderPage реализация PageRenderer для рендеринга страниц
 func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) {
+	// Добавляем специальный URL для тестирования перезапуска
+	if url == "https://invalid-url-that-triggers-restart" {
+		return "", errors.New("artificial error: could not dial \"ws:") // Ошибка, требующая перезапуска
+	}
+
 	r.allocatorMutex.RLock()
 	defer r.allocatorMutex.RUnlock()
 

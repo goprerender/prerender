@@ -19,7 +19,8 @@ import (
 	"github.com/goprerender/prerender/pkg/renderer"
 )
 
-// Конфигурация через переменные окружения
+const containerName = "headless-shell"
+
 var (
 	concurrentRequests = 10
 	longTermRequests   = 30
@@ -27,7 +28,6 @@ var (
 )
 
 func init() {
-	// Чтение конфигурации из переменных окружения
 	if env, ok := os.LookupEnv("CONCURRENT_REQUESTS"); ok {
 		if n, err := strconv.Atoi(env); err == nil {
 			concurrentRequests = n
@@ -74,7 +74,6 @@ func (l *RealLogger) Debugf(format string, args ...interface{}) {
 	log.Printf(format, args...)
 }
 
-// waitForContainerPort ожидает доступности порта контейнера
 func waitForContainerPort(port int, timeout time.Duration) error {
 	start := time.Now()
 	address := fmt.Sprintf("localhost:%d", port)
@@ -96,15 +95,12 @@ func waitForContainerPort(port int, timeout time.Duration) error {
 	}
 }
 
-// ensureContainerRunning проверяет и запускает контейнер при необходимости
 func ensureContainerRunning() error {
-	// Проверяем статус контейнера
-	cmd := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", "headless-shell")
+	cmd := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", containerName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		// Если контейнер не существует, создаем его
 		log.Println("Container not found, creating...")
-		cmd = exec.Command("docker", "run", "-d", "-p", "9222:9222", "--name", "headless-shell", "chromedp/headless-shell")
+		cmd = exec.Command("docker", "run", "-d", "-p", "9222:9222", "--name", containerName, "chromedp/headless-shell")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to create container: %v\n%s", err, output)
 		}
@@ -119,7 +115,7 @@ func ensureContainerRunning() error {
 	}
 
 	log.Printf("Container status: %s, attempting to start...", status)
-	cmd = exec.Command("docker", "start", "headless-shell")
+	cmd = exec.Command("docker", "start", containerName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to start container: %v\n%s", err, output)
 	}
@@ -131,7 +127,6 @@ func ensureContainerRunning() error {
 func main() {
 	logger := &RealLogger{}
 
-	// Убедимся, что контейнер запущен и порт доступен
 	log.Println("Preparing container...")
 	if err := ensureContainerRunning(); err != nil {
 		log.Fatalf("Container error: %v", err)
@@ -139,39 +134,35 @@ func main() {
 
 	r := renderer.NewRenderer(logger, &renderer.RealCommander{}, &renderer.RealHTTPClient{})
 	r.SetConsoleCapture(true)
-
-	// Устанавливаем увеличенные параметры
-	r.SetContainerReadyTimeout(60 * time.Second) // Увеличено с 30 секунд
-	r.SetDebugURLMaxAttempts(60)                 // Увеличено с 30 попыток
+	r.SetContainerReadyTimeout(60 * time.Second)
+	r.SetDebugURLMaxAttempts(60)
 
 	fmt.Println("Starting renderer stress test...")
 	fmt.Printf("Configuration:\n  Concurrent requests: %d\n  Long-term requests: %d\n  Timeout: %v\n",
 		concurrentRequests, longTermRequests, renderTimeout)
 
-	// Обработка сигналов для корректного завершения
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Даем время на инициализацию рендерера
 	log.Println("Initializing renderer...")
 	r.Setup()
 
-	// Ждем готовности контейнера
 	log.Println("Waiting for renderer to be ready...")
 	start := time.Now()
 	for !r.IsContainerReady() {
-		if time.Since(start) > 60*time.Second { // Соответствует новому таймауту
+		if time.Since(start) > 60*time.Second {
 			log.Fatal("Renderer failed to become ready within 60 seconds")
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	log.Println("Renderer is ready")
 
-	// Запускаем мониторинг ресурсов в отдельной горутине
-	resources := make(chan ResourceStats, 100)
-	go monitorResources(ctx, resources)
+	// Запускаем тест перезапуска контейнера
+	testContainerRestart(ctx, r, logger)
 
-	// Тестовые URL с фильтрацией проблемных
+	// Тест 1: Последовательный рендеринг
+	fmt.Println("\n=== Sequential rendering test ===")
+	startSequential := time.Now()
 	testURLs := []string{
 		"https://example.com",
 		"https://google.com",
@@ -181,15 +172,12 @@ func main() {
 		"https://apple.com",
 		"https://httpbin.org/get",
 		"https://jsonplaceholder.typicode.com/posts/1",
-		"https://httpbin.org/delay/2",    // Задержка 2 сек
-		"https://httpbin.org/delay/5",    // Задержка 5 сек
-		"https://httpbin.org/status/404", // 404 страница
-		"https://httpbin.org/status/500", // Ошибка сервера
+		"https://httpbin.org/delay/2",
+		"https://httpbin.org/delay/5",
+		"https://httpbin.org/status/404",
+		"https://httpbin.org/status/500",
 	}
 
-	// Тест 1: Последовательный рендеринг
-	fmt.Println("\n=== Sequential rendering test ===")
-	startSequential := time.Now()
 	for i, url := range testURLs {
 		if ctx.Err() != nil {
 			break
@@ -198,7 +186,7 @@ func main() {
 	}
 	seqDuration := time.Since(startSequential)
 	fmt.Printf("Sequential test completed in %v\n", seqDuration)
-	logStats("Sequential", seqDuration, len(testURLs), resources)
+	logStats("Sequential", seqDuration, len(testURLs))
 
 	// Тест 2: Параллельный рендеринг
 	fmt.Println("\n=== Concurrent rendering test ===")
@@ -216,14 +204,12 @@ func main() {
 			renderPage(ctx, r, url, i)
 		}(i)
 
-		// Добавляем небольшую задержку между запуском горутин
 		time.Sleep(100 * time.Millisecond)
 	}
 	wg.Wait()
 	conDuration := time.Since(startConcurrent)
 	fmt.Printf("Concurrent test completed in %v\n", conDuration)
-	// Исправлено: убрана лишняя скобка
-	logStats("Concurrent", conDuration, concurrentRequests, resources)
+	logStats("Concurrent", conDuration, concurrentRequests)
 
 	// Тест 3: Долговременная стабильность
 	fmt.Println("\n=== Long-term stability test ===")
@@ -256,7 +242,6 @@ func main() {
 			successes++
 		}
 
-		// Случайная пауза между запросами
 		delay := time.Duration(rand.Intn(1000)) * time.Millisecond
 		time.Sleep(delay)
 	}
@@ -266,11 +251,7 @@ func main() {
 	fmt.Printf("Stability test: %d/%d successful (%.1f%%), %d timeouts\n",
 		successes, successes+failures, successRate, timeouts)
 	fmt.Printf("Total test duration: %v\n", totalDuration)
-	// Исправлено: убрана лишняя скобка
-	logStats("Stability", totalDuration, longTermRequests, resources)
-
-	// Выводим сводку по ресурсам
-	printResourceSummary(resources)
+	logStats("Stability", totalDuration, longTermRequests)
 
 	fmt.Println("\nAll tests completed successfully!")
 }
@@ -303,12 +284,10 @@ func monitorResources(ctx context.Context, stats chan<- ResourceStats) {
 	for {
 		select {
 		case <-ticker.C:
-			// В реальной реализации здесь будет сбор метрик
-			// Например: docker stats, системные метрики
 			stats <- ResourceStats{
 				Timestamp: time.Now(),
-				CPU:       rand.Float64() * 100,  // Заглушка
-				Memory:    rand.Float64() * 4096, // Заглушка
+				CPU:       rand.Float64() * 100,
+				Memory:    rand.Float64() * 4096,
 			}
 		case <-ctx.Done():
 			close(stats)
@@ -317,7 +296,7 @@ func monitorResources(ctx context.Context, stats chan<- ResourceStats) {
 	}
 }
 
-func logStats(testName string, duration time.Duration, requests int, stats chan ResourceStats) {
+func logStats(testName string, duration time.Duration, requests int) {
 	if requests == 0 {
 		log.Printf("[%s] No requests completed", testName)
 		return
@@ -325,6 +304,68 @@ func logStats(testName string, duration time.Duration, requests int, stats chan 
 
 	avg := duration / time.Duration(requests)
 	log.Printf("[%s] Avg per request: %v, Total: %v", testName, avg, duration)
+}
+
+func testContainerRestart(ctx context.Context, r *renderer.Renderer, logger *RealLogger) {
+	fmt.Println("\n=== Container restart test ===")
+
+	// Получаем время последнего старта контейнера
+	log.Println("Getting container start time before restart...")
+	startTimeBefore := getContainerStartTime()
+	log.Printf("Container start time before restart: %s", startTimeBefore)
+
+	// Специальный URL для тестирования перезапуска
+	triggerURL := "https://invalid-url-that-triggers-restart"
+
+	// Первый рендер - должен вызвать ошибку и триггернуть перезапуск
+	log.Println("Simulating connection error to trigger restart...")
+	start := time.Now()
+	_, err := r.DoRender(triggerURL)
+	duration := time.Since(start)
+
+	if err == nil {
+		log.Fatal("Expected error but got success")
+	}
+	log.Printf("Received expected error: %v (duration: %v)", err, duration)
+
+	// Ждем перезапуска
+	log.Println("Waiting for container to restart...")
+	startWait := time.Now()
+	for {
+		// Проверяем, изменилось ли время старта контейнера
+		currentStartTime := getContainerStartTime()
+		if currentStartTime != startTimeBefore {
+			log.Printf("Container restarted! New start time: %s", currentStartTime)
+			break
+		}
+
+		if time.Since(startWait) > 120*time.Second {
+			log.Fatal("Container did not restart within 120 seconds")
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	// Проверяем, что рендеринг работает после перезапуска
+	log.Println("Verifying rendering after restart...")
+	start = time.Now()
+	result, err := r.DoRender("https://example.com")
+	duration = time.Since(start)
+
+	if err != nil {
+		log.Fatalf("Rendering failed after restart: %v", err)
+	}
+	log.Printf("Rendered successfully in %v: %d bytes", duration, len(result.HTML))
+	log.Println("Container restart test completed successfully!")
+}
+
+// getContainerStartTime возвращает время старта контейнера
+func getContainerStartTime() string {
+	cmd := exec.Command("docker", "inspect", "-f", "{{.State.StartedAt}}", containerName)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func printResourceSummary(stats chan ResourceStats) {
@@ -354,7 +395,7 @@ done:
 
 	if samples > 0 {
 		fmt.Printf("Max CPU usage: %.1f%%\n", maxCPU)
-		fmt.Printf("Max Memory usage: %.1f MB\n", maxMemory)
+		fmt.Printf("Max Memory usage: %.1f MB\n", maxMemory/1024/1024)
 	} else {
 		fmt.Println("No resource data collected")
 	}
