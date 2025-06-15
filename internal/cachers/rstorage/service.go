@@ -2,10 +2,10 @@ package rstorage
 
 import (
 	"context"
-	"github.com/golang/protobuf/ptypes"
 	"github.com/goprerender/prerender/internal/cachers"
 	"github.com/goprerender/prerender/pkg/api/storage"
 	"github.com/goprerender/prerender/pkg/log"
+	"google.golang.org/protobuf/ptypes"
 	"time"
 )
 

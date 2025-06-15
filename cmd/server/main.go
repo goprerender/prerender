@@ -47,7 +47,7 @@ func main() {
 
 	pc := rstorage.New(sc, logger)
 
-	r := renderer.NewRenderer(logger)
+	r := renderer.NewRenderer(logger, &renderer.RealCommander{}, &renderer.RealHTTPClient{})
 	defer r.Cancel()
 
 	e := executor.NewExecutor(r, pc, logger)

@@ -1,4 +1,3 @@
-// renderer.go
 package renderer
 
 import (
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 )
@@ -38,14 +38,17 @@ func (c *RealCommander) Command(name string, arg ...string) *exec.Cmd {
 
 // HTTPClient интерфейс для HTTP-клиента
 type HTTPClient interface {
-	Get(url string) (*http.Response, error)
+	Do(req *http.Request) (*http.Response, error)
 }
 
 // RealHTTPClient реализация HTTPClient для реального окружения
 type RealHTTPClient struct{}
 
-func (c *RealHTTPClient) Get(url string) (*http.Response, error) {
-	return http.Get(url)
+func (c *RealHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+	return client.Do(req)
 }
 
 // Logger интерфейс для логирования
@@ -60,18 +63,31 @@ type Logger interface {
 	Debugf(format string, args ...interface{})
 }
 
+// AllocatorCreator интерфейс для создания аллокатора
+type AllocatorCreator interface {
+	CreateRemoteAllocator(ctx context.Context, url string) (context.Context, context.CancelFunc)
+}
+
+// RealAllocatorCreator реализация AllocatorCreator для реального окружения
+type RealAllocatorCreator struct{}
+
+func (a *RealAllocatorCreator) CreateRemoteAllocator(ctx context.Context, url string) (context.Context, context.CancelFunc) {
+	return chromedp.NewRemoteAllocator(ctx, url)
+}
+
 // Constants
 const (
 	containerName         = "headless-shell"
 	debugURL              = "http://localhost:9222/json/version"
-	renderTimeout         = 60 * time.Second
-	containerStartDelay   = 10 * time.Second
+	renderTimeout         = 120 * time.Second
+	containerStartDelay   = 30 * time.Second
 	containerReadyDelay   = 5 * time.Second
-	maxRestartAttempts    = 3
+	maxRestartAttempts    = 5
 	dockerHealthCheckCmd  = "docker inspect -f '{{.State.Status}}' " + containerName
 	maxConcurrentRenders  = 10
-	containerReadyTimeout = 60 * time.Second
-	restartCooldown       = 15 * time.Second
+	containerReadyTimeout = 180 * time.Second
+	restartCooldown       = 60 * time.Second
+	portCheckTimeout      = 10 * time.Second
 )
 
 // Errors
@@ -84,11 +100,18 @@ var (
 	ErrContainerStartFail = errors.New("container start failed")
 	ErrContextCanceled    = errors.New("context canceled")
 	ErrInvalidContext     = errors.New("invalid context")
+	ErrPortNotAvailable   = errors.New("debug port not available")
+	ErrChromeNotReady     = errors.New("chrome not ready")
 )
 
 // PortChecker интерфейс для проверки портов
 type PortChecker interface {
 	IsPortAvailable(port int) bool
+}
+
+// PageRenderer интерфейс для рендеринга страниц
+type PageRenderer interface {
+	RenderPage(url string, result *RenderResult) (string, error)
 }
 
 // Renderer структура для управления процессом рендеринга
@@ -115,12 +138,14 @@ type Renderer struct {
 	allocatorMutex        sync.RWMutex
 	commander             Commander
 	httpClient            HTTPClient
-	containerReadyTimeout time.Duration
+	ContainerReadyTimeout time.Duration
 	containerStartDelay   time.Duration
 	debugURLRetryDelay    time.Duration
 	debugURLMaxAttempts   int
 	portChecker           PortChecker
 	sleeper               func(d time.Duration)
+	pageRenderer          PageRenderer // Стратегия рендеринга страниц
+	allocatorCreator      AllocatorCreator
 }
 
 // RenderResult результат рендеринга
@@ -148,19 +173,27 @@ func NewRenderer(logger Logger, commander Commander, httpClient HTTPClient) *Ren
 			"maps.googleapis.com",
 			"googletagmanager.com",
 			"api-maps.yandex.ru",
+			"doubleclick.net",
+			"facebook.net",
 		},
 		semaphore:             make(chan struct{}, maxConcurrentRenders),
 		restartQueue:          make(chan struct{}, 1),
 		commander:             commander,
 		httpClient:            httpClient,
-		containerReadyTimeout: 60 * time.Second,
-		containerStartDelay:   10 * time.Second,
+		ContainerReadyTimeout: containerReadyTimeout,
+		containerStartDelay:   containerStartDelay,
 		debugURLRetryDelay:    1 * time.Second,
-		debugURLMaxAttempts:   15,
+		debugURLMaxAttempts:   20,
+		allocatorCreator:      &RealAllocatorCreator{},
 	}
 	r.resetReadyCh()
-	r.Setup()
+	r.pageRenderer = r // Use self as default renderer
 	return r
+}
+
+// SetPageRenderer устанавливает кастомный рендерер страниц
+func (r *Renderer) SetPageRenderer(pr PageRenderer) {
+	r.pageRenderer = pr
 }
 
 func (r *Renderer) setContainerReady(ready bool) {
@@ -222,7 +255,7 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 			continue
 		}
 
-		content, err := r.renderPage(requestURL, result)
+		content, err := r.pageRenderer.RenderPage(requestURL, result)
 		if err == nil {
 			result.HTML = content
 			result.TotalTime = time.Since(startTime)
@@ -264,6 +297,63 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 	return nil, fmt.Errorf("%w: all attempts failed for %s", ErrNotResponding, requestURL)
 }
 
+// RenderPage реализация PageRenderer для рендеринга страниц
+func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) {
+	r.allocatorMutex.RLock()
+	defer r.allocatorMutex.RUnlock()
+
+	if r.allocatorCtx == nil || r.allocatorCtx.Err() != nil {
+		return "", ErrInvalidContext
+	}
+
+	tabCtx, cancelTab := chromedp.NewContext(r.allocatorCtx)
+	defer cancelTab()
+
+	ctx, cancel := context.WithTimeout(tabCtx, renderTimeout)
+	defer cancel()
+
+	if r.captureConsoleLog {
+		r.captureConsoleEvents(ctx, result)
+	}
+
+	var htmlContent string
+	tasks := chromedp.Tasks{
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return network.SetBlockedURLs(r.blockedURLs).Do(ctx)
+		}),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return network.SetExtraHTTPHeaders(network.Headers{"X-Prerender": "1"}).Do(ctx)
+		}),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			_, _, _, err := page.Navigate(url).Do(ctx)
+			if err != nil && !strings.Contains(err.Error(), "net::ERR_BLOCKED_BY_CLIENT") {
+				return err
+			}
+			return nil
+		}),
+		chromedp.Sleep(500 * time.Millisecond),
+		chromedp.OuterHTML("html", &htmlContent, chromedp.ByQuery),
+	}
+
+	start := time.Now()
+	err := chromedp.Run(ctx, tasks)
+	result.RenderTime = time.Since(start)
+
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", ErrTimeoutExceeded
+		}
+		if errors.Is(err, context.Canceled) {
+			return "", context.Canceled
+		}
+		if strings.Contains(err.Error(), "ERR_NAME_NOT_RESOLVED") {
+			return "", ErrNameNotResolved
+		}
+		return "", err
+	}
+	return htmlContent, nil
+}
+
 // waitForContainerReady ожидает готовности контейнера
 func (r *Renderer) waitForContainerReady() error {
 	start := time.Now()
@@ -274,8 +364,8 @@ func (r *Renderer) waitForContainerReady() error {
 			return nil
 		}
 
-		if time.Since(start) > r.containerReadyTimeout {
-			return fmt.Errorf("timeout after %v", r.containerReadyTimeout)
+		if time.Since(start) > r.ContainerReadyTimeout {
+			return fmt.Errorf("timeout after %v", r.ContainerReadyTimeout)
 		}
 
 		r.logger.Warnf("Container not ready, waiting %v...", waitTime)
@@ -298,53 +388,6 @@ func (r *Renderer) isContainerReady() bool {
 	r.readyMutex.Lock()
 	defer r.readyMutex.Unlock()
 	return r.containerReady
-}
-
-// renderPage выполняет рендеринг страницы
-func (r *Renderer) renderPage(url string, result *RenderResult) (string, error) {
-	r.allocatorMutex.RLock()
-	defer r.allocatorMutex.RUnlock()
-
-	if r.allocatorCtx == nil || r.allocatorCtx.Err() != nil {
-		return "", ErrInvalidContext
-	}
-
-	tabCtx, cancelTab := chromedp.NewContext(r.allocatorCtx)
-	defer cancelTab()
-
-	ctx, cancel := context.WithTimeout(tabCtx, renderTimeout)
-	defer cancel()
-
-	if r.captureConsoleLog {
-		r.captureConsoleEvents(ctx, result)
-	}
-
-	var htmlContent string
-	tasks := chromedp.Tasks{
-		network.SetBlockedURLS(r.blockedURLs),
-		network.SetExtraHTTPHeaders(network.Headers{"X-Prerender": "1"}),
-		chromedp.Navigate(url),
-		chromedp.Sleep(500 * time.Millisecond),
-		chromedp.OuterHTML("html", &htmlContent, chromedp.ByQuery),
-	}
-
-	start := time.Now()
-	err := chromedp.Run(ctx, tasks)
-	result.RenderTime = time.Since(start)
-
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return "", ErrTimeoutExceeded
-		}
-		if errors.Is(err, context.Canceled) {
-			return "", context.Canceled
-		}
-		if strings.Contains(err.Error(), "ERR_NAME_NOT_RESOLVED") {
-			return "", ErrNameNotResolved
-		}
-		return "", err
-	}
-	return htmlContent, nil
 }
 
 // captureConsoleEvents захватывает события консоли
@@ -370,6 +413,10 @@ func (r *Renderer) captureConsoleEvents(ctx context.Context, result *RenderResul
 		case *runtime.EventExceptionThrown:
 			result.Exception = ev.ExceptionDetails.Error()
 			r.logger.Errorf("Exception: %s", result.Exception)
+
+		default:
+			// Игнорируем неизвестные события
+			return
 		}
 	})
 }
@@ -383,13 +430,18 @@ func (r *Renderer) shouldRestart(err error) bool {
 
 // Setup настраивает рендерер
 func (r *Renderer) Setup() {
-	r.logger.Info("Initializing renderer...")
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
 
-	if !r.isStarted {
-		r.logger.Info("Setting up container...")
-		if err := r.setupContainer(); err != nil {
-			r.logger.Errorf("Container setup error: %v", err)
-		}
+	if r.isStarted {
+		r.logger.Info("Renderer already initialized")
+		return
+	}
+
+	r.logger.Info("Initializing renderer...")
+	r.logger.Info("Setting up container...")
+	if err := r.setupContainer(); err != nil {
+		r.logger.Errorf("Container setup error: %v", err)
 	}
 
 	r.logger.Info("Connecting to Chrome...")
@@ -415,9 +467,13 @@ func (r *Renderer) setRemoteAllocator(wsURL string) {
 		r.cancelAllocator()
 	}
 
-	allocatorCtx, cancel := chromedp.NewRemoteAllocator(context.Background(), wsURL)
+	// Используем таймаут для создания аллокатора
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	allocatorCtx, cancelAlloc := r.allocatorCreator.CreateRemoteAllocator(ctx, wsURL)
 	r.allocatorCtx = allocatorCtx
-	r.cancelAllocator = cancel
+	r.cancelAllocator = cancelAlloc
 	r.wsURL = wsURL
 	r.isRemote = true
 }
@@ -448,7 +504,7 @@ func (r *Renderer) restartContainer() error {
 	select {
 	case <-done:
 		r.logger.Info("All active requests completed")
-	case <-time.After(15 * time.Second):
+	case <-time.After(30 * time.Second):
 		r.logger.Warn("Timeout waiting for active requests, proceeding with restart")
 	}
 
@@ -493,10 +549,13 @@ func (r *Renderer) restartContainer() error {
 func (r *Renderer) getDebugURLWithRetry() (string, error) {
 	attempt := 1
 	delay := r.debugURLRetryDelay
-	maxDelay := 10 * time.Second
+	maxDelay := 15 * time.Second
 
 	for attempt <= r.debugURLMaxAttempts {
-		wsURL, err := r.getDebugURL()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		wsURL, err := r.getDebugURL(ctx)
+		cancel()
+
 		if err == nil {
 			return wsURL, nil
 		}
@@ -504,7 +563,7 @@ func (r *Renderer) getDebugURLWithRetry() (string, error) {
 		r.logger.Debugf("Debug URL attempt failed (%d/%d): %v", attempt, r.debugURLMaxAttempts, err)
 
 		if attempt < r.debugURLMaxAttempts {
-			if delay > 0 { // Защита от нулевой задержки
+			if delay > 0 {
 				if r.sleeper != nil {
 					r.sleeper(delay)
 				} else {
@@ -523,6 +582,45 @@ func (r *Renderer) getDebugURLWithRetry() (string, error) {
 	return "", fmt.Errorf("failed to get debug URL after %d attempts", r.debugURLMaxAttempts)
 }
 
+// getDebugURL получает URL для отладки
+func (r *Renderer) getDebugURL(ctx context.Context) (string, error) {
+	if r.portChecker != nil && !r.portChecker.IsPortAvailable(9222) {
+		return "", ErrPortNotAvailable
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", debugURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var data struct {
+		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return "", err
+	}
+
+	if data.WebSocketDebuggerURL == "" {
+		return "", errors.New("empty debug URL")
+	}
+	return data.WebSocketDebuggerURL, nil
+}
+
 // setRestarting устанавливает флаг перезапуска
 func (r *Renderer) setRestarting(state bool) {
 	r.mutex.Lock()
@@ -539,9 +637,6 @@ func (r *Renderer) isRestarting() bool {
 
 // setupContainer настраивает контейнер
 func (r *Renderer) setupContainer() error {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-
 	if r.isStarted {
 		return nil
 	}
@@ -556,15 +651,11 @@ func (r *Renderer) setupContainer() error {
 	status := r.getContainerStatus()
 	r.logger.Infof("Initial container status: %s", status)
 
-	if status != "running" {
-		r.logger.Warnf("Starting container, current status: %s", status)
-		cmd := r.commander.Command(r.dockerPath, "start", containerName)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			errMsg := fmt.Errorf("start failed: %w\n%s", err, output)
-			r.logger.Errorf("%v", errMsg)
-			return errMsg
-		}
+	// Если контейнер уже запущен, сразу возвращаем успех
+	if status == "running" {
+		r.isStarted = true
+		r.logger.Info("Container setup completed")
+		return nil
 	}
 
 	if r.sleeper != nil {
@@ -596,46 +687,12 @@ func (r *Renderer) getContainerStatus() string {
 type RealPortChecker struct{}
 
 func (c *RealPortChecker) IsPortAvailable(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), 2*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), portCheckTimeout)
 	if err != nil {
 		return false
 	}
 	conn.Close()
 	return true
-}
-
-// getDebugURL получает URL для отладки
-func (r *Renderer) getDebugURL() (string, error) {
-	if r.portChecker != nil && !r.portChecker.IsPortAvailable(9222) {
-		return "", errors.New("debug port not available")
-	}
-
-	resp, err := r.httpClient.Get(debugURL)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status: %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	var data struct {
-		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
-	}
-	if err := json.Unmarshal(body, &data); err != nil {
-		return "", err
-	}
-
-	if data.WebSocketDebuggerURL == "" {
-		return "", errors.New("empty debug URL")
-	}
-	return data.WebSocketDebuggerURL, nil
 }
 
 // Cancel отменяет операции рендерера
