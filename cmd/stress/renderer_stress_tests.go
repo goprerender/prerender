@@ -23,7 +23,7 @@ import (
 var (
 	concurrentRequests = 10
 	longTermRequests   = 1
-	renderTimeout      = 120 * time.Second // Оптимизированный таймаут
+	renderTimeout      = 120 * time.Second
 	containerName      = "headless-shell-test"
 )
 
@@ -51,7 +51,6 @@ func init() {
 	}
 }
 
-// RealLogger provides a simple logging implementation
 type RealLogger struct{}
 
 func (l *RealLogger) log(prefix string, args ...interface{}) {
@@ -62,47 +61,38 @@ func (l *RealLogger) logf(prefix, format string, args ...interface{}) {
 	log.Printf("["+prefix+"] "+format, args...)
 }
 
-// Info logs informational messages
 func (l *RealLogger) Info(args ...interface{}) {
 	l.log("INFO", args...)
 }
 
-// Infof logs formatted informational messages
 func (l *RealLogger) Infof(format string, args ...interface{}) {
 	l.logf("INFO", format, args...)
 }
 
-// Warn logs warning messages
 func (l *RealLogger) Warn(args ...interface{}) {
 	l.log("WARN", args...)
 }
 
-// Warnf logs formatted warning messages
 func (l *RealLogger) Warnf(format string, args ...interface{}) {
 	l.logf("WARN", format, args...)
 }
 
-// Error logs error messages
 func (l *RealLogger) Error(args ...interface{}) {
 	l.log("ERROR", args...)
 }
 
-// Errorf logs formatted error messages
 func (l *RealLogger) Errorf(format string, args ...interface{}) {
 	l.logf("ERROR", format, args...)
 }
 
-// Debug logs debug messages
 func (l *RealLogger) Debug(args ...interface{}) {
 	l.log("DEBUG", args...)
 }
 
-// Debugf logs formatted debug messages
 func (l *RealLogger) Debugf(format string, args ...interface{}) {
 	l.logf("DEBUG", format, args...)
 }
 
-// waitForContainerPort waits until a container port becomes available
 func waitForContainerPort(port int, timeout time.Duration) error {
 	start := time.Now()
 	address := fmt.Sprintf("localhost:%d", port)
@@ -120,11 +110,10 @@ func waitForContainerPort(port int, timeout time.Duration) error {
 		}
 
 		log.Printf("Waiting for container port %d... (%v elapsed)", port, time.Since(start))
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(1 * time.Second)
 	}
 }
 
-// createContainer creates a new Docker container
 func createContainer(port int) error {
 	log.Println("Creating new container...")
 	cmd := exec.Command("docker", "run", "-d",
@@ -139,7 +128,6 @@ func createContainer(port int) error {
 		"--single-process",
 		"--disable-setuid-sandbox",
 		"--no-sandbox",
-		// Добавляем health-check период
 		"--health-start-period=10s",
 	)
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -149,20 +137,17 @@ func createContainer(port int) error {
 	return waitForContainerPort(port, 60*time.Second)
 }
 
-// cleanupContainer stops and removes the container
 func cleanupContainer() {
 	if containerName == "" {
 		return
 	}
 
-	// Check if container exists
 	cmd := exec.Command("docker", "inspect", "--format='{{.State.Status}}'", containerName)
 	if _, err := cmd.CombinedOutput(); err != nil {
 		log.Println("Container does not exist, nothing to clean up")
 		return
 	}
 
-	// Stop container
 	log.Println("Stopping container...")
 	cmd = exec.Command("docker", "stop", "-t", "0", containerName)
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -171,7 +156,6 @@ func cleanupContainer() {
 		log.Println("Container stopped")
 	}
 
-	// Remove container
 	log.Println("Removing container...")
 	cmd = exec.Command("docker", "rm", containerName)
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -181,7 +165,6 @@ func cleanupContainer() {
 	}
 }
 
-// getContainerPort retrieves the host port mapped to the container
 func getContainerPort() (int, error) {
 	cmd := exec.Command("docker", "inspect",
 		"--format", "{{(index (index .NetworkSettings.Ports \"9222/tcp\") 0).HostPort}}",
@@ -205,7 +188,6 @@ func getContainerPort() (int, error) {
 	return port, nil
 }
 
-// ensureContainerRunning ensures the container is running on the specified port
 func ensureContainerRunning(port int) error {
 	cleanupContainer()
 
@@ -225,7 +207,6 @@ func ensureContainerRunning(port int) error {
 	return nil
 }
 
-// getContainerLogs retrieves container logs for diagnostics
 func getContainerLogs() string {
 	if containerName == "" {
 		return ""
@@ -240,16 +221,12 @@ func getContainerLogs() string {
 }
 
 func main() {
-	// Configure log format: date + time + microseconds
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-
-	// Log system information
 	log.Printf("Starting stress test on %s with %d CPUs",
 		runtime.GOOS, runtime.NumCPU())
 
 	logger := &RealLogger{}
 
-	// Ensure we capture container logs before cleanup
 	defer func() {
 		logs := getContainerLogs()
 		if logs != "" {
@@ -280,8 +257,8 @@ func main() {
 	r.SetDebugPort(actualPort)
 	r.SetPortChecker(renderer.NewRealPortChecker())
 	r.SetConsoleCapture(true)
-	r.SetContainerReadyTimeout(120 * time.Second) // Оптимизированный таймаут
-	r.SetDebugURLMaxAttempts(15)                  // Оптимизировано количество попыток
+	r.SetContainerReadyTimeout(120 * time.Second)
+	r.SetDebugURLMaxAttempts(15)
 	r.SetConcurrencyLimit(5)
 	r.SetRenderTimeout(renderTimeout)
 
@@ -300,7 +277,7 @@ func main() {
 	log.Println("Waiting for renderer to be ready...")
 	start := time.Now()
 	for !r.IsContainerReady() {
-		if time.Since(start) > 120*time.Second { // Оптимизированный таймаут
+		if time.Since(start) > 120*time.Second {
 			log.Fatal("Renderer failed to become ready within 120 seconds")
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -394,7 +371,6 @@ func main() {
 	fmt.Println("\nAll tests completed successfully!")
 }
 
-// renderPage renders a single page and logs the result with detailed timings
 func renderPage(ctx context.Context, r *renderer.Renderer, url string, id int) {
 	start := time.Now()
 	result, err := r.DoRender(url)
@@ -406,9 +382,10 @@ func renderPage(ctx context.Context, r *renderer.Renderer, url string, id int) {
 		return
 	}
 
-	// Log detailed timings for performance analysis
-	log.Printf("[%d] Rendered %s in %v [nav=%v, wait=%v, render=%v] (%d bytes, console logs: %d)",
+	ttfb := result.Timings.Navigation - result.Timings.Waiting
+	log.Printf("[%d] Rendered %s in %v [TTFB=%v, nav=%v, wait=%v, render=%v] (%d bytes, console logs: %d)",
 		id, url, duration,
+		ttfb,
 		result.Timings.Navigation,
 		result.Timings.Waiting,
 		result.Timings.Rendering,
@@ -416,14 +393,12 @@ func renderPage(ctx context.Context, r *renderer.Renderer, url string, id int) {
 		len(result.Console))
 }
 
-// ResourceStats contains resource usage metrics
 type ResourceStats struct {
 	Timestamp time.Time
 	CPU       float64
 	Memory    float64
 }
 
-// logStats logs performance statistics for a test
 func logStats(testName string, duration time.Duration, requests int) {
 	if requests == 0 {
 		log.Printf("[%s] No requests completed", testName)
@@ -434,7 +409,6 @@ func logStats(testName string, duration time.Duration, requests int) {
 	log.Printf("[%s] Avg per request: %v, Total: %v", testName, avg, duration)
 }
 
-// testContainerRestart tests container recovery functionality
 func testContainerRestart(ctx context.Context, r *renderer.Renderer, logger *RealLogger) {
 	log.Println("\n=== Container restart test ===")
 
@@ -457,17 +431,19 @@ func testContainerRestart(ctx context.Context, r *renderer.Renderer, logger *Rea
 
 	log.Println("Waiting for container to restart...")
 	startWait := time.Now()
+	timeout := 30 * time.Second
 	for {
 		currentStartTime := getContainerStartTime(r)
 		if currentStartTime != startTimeBefore {
-			log.Printf("Container restarted! New start time: %s", currentStartTime)
+			log.Printf("Container restarted in %v! New start time: %s",
+				time.Since(startWait), currentStartTime)
 			break
 		}
 
-		if time.Since(startWait) > 120*time.Second {
-			log.Fatal("Container did not restart within 120 seconds")
+		if time.Since(startWait) > timeout {
+			log.Fatalf("Container did not restart within %v", timeout)
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(1 * time.Second)
 	}
 
 	log.Println("Verifying rendering after restart...")
@@ -482,7 +458,6 @@ func testContainerRestart(ctx context.Context, r *renderer.Renderer, logger *Rea
 	log.Println("Container restart test completed successfully!")
 }
 
-// getContainerStartTime retrieves container start time
 func getContainerStartTime(r *renderer.Renderer) string {
 	cmd := exec.Command("docker", "inspect", "-f", "{{.State.StartedAt}}", r.GetContainerName())
 	output, err := cmd.CombinedOutput()
@@ -492,9 +467,8 @@ func getContainerStartTime(r *renderer.Renderer) string {
 	return strings.TrimSpace(string(output))
 }
 
-// monitorRenderer monitors renderer health and forces recovery when needed
 func monitorRenderer(ctx context.Context, r *renderer.Renderer) {
-	ticker := time.NewTicker(30 * time.Second) // Увеличен интервал проверки
+	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -511,7 +485,6 @@ func monitorRenderer(ctx context.Context, r *renderer.Renderer) {
 	}
 }
 
-// waitForRendererReady waits for renderer to become ready
 func waitForRendererReady(r *renderer.Renderer, timeout time.Duration) {
 	log.Println("Waiting for renderer recovery...")
 	start := time.Now()
@@ -519,41 +492,7 @@ func waitForRendererReady(r *renderer.Renderer, timeout time.Duration) {
 		if time.Since(start) > timeout {
 			log.Fatal("Renderer recovery failed within timeout")
 		}
-		time.Sleep(2 * time.Second) // Увеличен интервал проверки
+		time.Sleep(2 * time.Second)
 	}
 	log.Println("Renderer recovered successfully")
-}
-
-// printResourceSummary prints resource usage statistics
-func printResourceSummary(stats chan ResourceStats) {
-	fmt.Println("\n=== Resource usage summary ===")
-
-	var maxCPU, maxMemory float64
-	var samples int
-
-	for {
-		select {
-		case stat, ok := <-stats:
-			if !ok {
-				goto done
-			}
-			if stat.CPU > maxCPU {
-				maxCPU = stat.CPU
-			}
-			if stat.Memory > maxMemory {
-				maxMemory = stat.Memory
-			}
-			samples++
-		default:
-			goto done
-		}
-	}
-done:
-
-	if samples > 0 {
-		fmt.Printf("Max CPU usage: %.1f%%\n", maxCPU)
-		fmt.Printf("Max Memory usage: %.1f MB\n", maxMemory/1024/1024)
-	} else {
-		fmt.Println("No resource data collected")
-	}
 }
