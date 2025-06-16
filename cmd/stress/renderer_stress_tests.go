@@ -23,7 +23,7 @@ import (
 var (
 	concurrentRequests = 10
 	longTermRequests   = 1
-	renderTimeout      = 300 * time.Second // Увеличен таймаут
+	renderTimeout      = 120 * time.Second // Оптимизированный таймаут
 	containerName      = "headless-shell-test"
 )
 
@@ -130,8 +130,8 @@ func createContainer(port int) error {
 	cmd := exec.Command("docker", "run", "-d",
 		"-p", fmt.Sprintf("%d:9222", port),
 		"--name", containerName,
-		"--memory=4g", "--cpus=4", "--shm-size=2g", // Увеличены ресурсы
-		"chromedp/headless-shell:latest", // Используем последнюю версию
+		"--memory=4g", "--cpus=4", "--shm-size=2g",
+		"chromedp/headless-shell:latest",
 		"--disable-software-rasterizer",
 		"--disable-gpu",
 		"--disable-dev-shm-usage",
@@ -139,12 +139,14 @@ func createContainer(port int) error {
 		"--single-process",
 		"--disable-setuid-sandbox",
 		"--no-sandbox",
+		// Добавляем health-check период
+		"--health-start-period=10s",
 	)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to create container: %v\n%s", err, output)
 	}
 	log.Println("Container created successfully")
-	return waitForContainerPort(port, 60*time.Second) // Увеличен таймаут
+	return waitForContainerPort(port, 60*time.Second)
 }
 
 // cleanupContainer stops and removes the container
@@ -162,7 +164,7 @@ func cleanupContainer() {
 
 	// Stop container
 	log.Println("Stopping container...")
-	cmd = exec.Command("docker", "stop", "-t", "0", containerName) // Быстрая остановка
+	cmd = exec.Command("docker", "stop", "-t", "0", containerName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		log.Printf("Failed to stop container: %v\n%s", err, output)
 	} else {
@@ -278,8 +280,8 @@ func main() {
 	r.SetDebugPort(actualPort)
 	r.SetPortChecker(renderer.NewRealPortChecker())
 	r.SetConsoleCapture(true)
-	r.SetContainerReadyTimeout(300 * time.Second) // Увеличен таймаут
-	r.SetDebugURLMaxAttempts(60)
+	r.SetContainerReadyTimeout(120 * time.Second) // Оптимизированный таймаут
+	r.SetDebugURLMaxAttempts(15)                  // Оптимизировано количество попыток
 	r.SetConcurrencyLimit(5)
 	r.SetRenderTimeout(renderTimeout)
 
@@ -298,8 +300,8 @@ func main() {
 	log.Println("Waiting for renderer to be ready...")
 	start := time.Now()
 	for !r.IsContainerReady() {
-		if time.Since(start) > 300*time.Second { // Увеличен таймаут
-			log.Fatal("Renderer failed to become ready within 300 seconds")
+		if time.Since(start) > 120*time.Second { // Оптимизированный таймаут
+			log.Fatal("Renderer failed to become ready within 120 seconds")
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -310,15 +312,6 @@ func main() {
 	log.Println("\n=== Sequential rendering test ===")
 	startSequential := time.Now()
 	testURLs := []string{
-		/*"https://online.freicon.ru",
-		"https://example.com",
-		"https://google.com",
-		"https://github.com",
-		"https://wikipedia.org",
-		"https://microsoft.com",
-		"https://apple.com",
-		"https://httpbin.org/get",
-		"https://jsonplaceholder.typicode.com/posts/1",*/
 		"https://httpbin.org/delay/2",
 		"https://httpbin.org/delay/5",
 		"https://httpbin.org/status/404",
@@ -501,29 +494,34 @@ func getContainerStartTime(r *renderer.Renderer) string {
 
 // monitorRenderer monitors renderer health and forces recovery when needed
 func monitorRenderer(ctx context.Context, r *renderer.Renderer) {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(30 * time.Second) // Увеличен интервал проверки
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			if !r.IsContainerReady() {
+			if !r.IsContainerReady() && !r.IsRestarting() {
 				log.Println("Renderer is not ready, initiating forced recovery...")
 				r.ForceRecovery()
-
-				start := time.Now()
-				for !r.IsContainerReady() {
-					if time.Since(start) > 2*time.Minute {
-						log.Fatal("Renderer recovery failed")
-					}
-					time.Sleep(5 * time.Second)
-				}
-				log.Println("Renderer recovered successfully")
+				waitForRendererReady(r, 2*time.Minute)
 			}
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// waitForRendererReady waits for renderer to become ready
+func waitForRendererReady(r *renderer.Renderer, timeout time.Duration) {
+	log.Println("Waiting for renderer recovery...")
+	start := time.Now()
+	for !r.IsContainerReady() {
+		if time.Since(start) > timeout {
+			log.Fatal("Renderer recovery failed within timeout")
+		}
+		time.Sleep(2 * time.Second) // Увеличен интервал проверки
+	}
+	log.Println("Renderer recovered successfully")
 }
 
 // printResourceSummary prints resource usage statistics

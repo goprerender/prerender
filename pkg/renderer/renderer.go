@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os/exec"
-	rt "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,13 +26,13 @@ import (
 const (
 	defaultContainerName    = "headless-shell"
 	defaultDebugPort        = 9826
-	defaultRenderTimeout    = 300 * time.Second // Увеличен таймаут
+	defaultRenderTimeout    = 120 * time.Second // Оптимизированный таймаут
 	maxRestartAttempts      = 5
 	maxConcurrentRenders    = 10
-	containerReadyTimeout   = 300 * time.Second // Увеличен таймаут
+	containerReadyTimeout   = 120 * time.Second // Оптимизированный таймаут
 	restartCooldown         = 60 * time.Second
 	portCheckTimeout        = 10 * time.Second
-	activeRequestsWaitLimit = 10 * time.Second
+	activeRequestsWaitLimit = 5 * time.Second // Уменьшенное время ожидания
 )
 
 // Service errors
@@ -334,7 +334,7 @@ func NewRenderer(logger Logger, commander Commander, httpClient HTTPClient) *Ren
 		httpClient:            httpClient,
 		containerReadyTimeout: containerReadyTimeout,
 		debugURLRetryDelay:    1 * time.Second,
-		debugURLMaxAttempts:   20,
+		debugURLMaxAttempts:   15, // Оптимизировано количество попыток
 		allocatorCreator:      &RealAllocatorCreator{},
 		portChecker:           &RealPortChecker{},
 		containerName:         defaultContainerName,
@@ -431,11 +431,32 @@ func (r *Renderer) ForceRecovery() {
 	defer r.mutex.Unlock()
 
 	r.logger.Info("Initiating forced recovery")
-	r.Cancel()
+	r.CancelActiveRequests() // Немедленная отмена всех запросов
 	r.setContainerReady(false)
 	r.resetReadyCh()
 
 	r.Setup()
+}
+
+// CancelActiveRequests immediately cancels all active rendering requests
+func (r *Renderer) CancelActiveRequests() {
+	r.allocatorMutex.Lock()
+	defer r.allocatorMutex.Unlock()
+
+	if r.cancelAllocator != nil {
+		r.logger.Info("Canceling active requests")
+		r.cancelAllocator()
+		r.cancelAllocator = nil
+		r.allocatorCtx = nil
+	}
+
+	// Сбрасываем счетчик активных запросов
+	atomic.StoreInt32(&r.activeRequests, 0)
+}
+
+// IsRestarting checks if container is currently restarting
+func (r *Renderer) IsRestarting() bool {
+	return r.restartingFlag
 }
 
 /******************************************
@@ -535,23 +556,15 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 		}
 
 		if r.shouldRestart(err) {
-			select {
-			case r.restartQueue <- struct{}{}:
+			if r.requestRestart() {
 				r.logger.Warn("Initiating container restart...")
-				if restartErr := r.restartContainer(); restartErr != nil {
-					r.logger.Errorf("Container restart failed: %v", restartErr)
-				}
-				<-r.restartQueue
-			default:
-				r.logger.Warn("Restart already queued, waiting...")
-				time.Sleep(2 * time.Second)
 			}
 
-			if err := r.waitForContainerReady(); err != nil {
-				r.logger.Errorf("Container not ready after restart: %v", err)
-			}
+			// Экспоненциальная задержка
+			delay := time.Duration(math.Pow(2, float64(attempt))) * time.Second
+			time.Sleep(delay)
 		} else {
-			time.Sleep(time.Second)
+			time.Sleep(1 * time.Second)
 		}
 	}
 
@@ -706,72 +719,68 @@ func (r *Renderer) isRestarting() bool {
 }
 
 func (r *Renderer) waitForContainerReady() error {
-	start := time.Now()
-	for !r.isContainerReady() {
-		if time.Since(start) > r.containerReadyTimeout {
+	timeout := time.After(r.containerReadyTimeout)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
 			return fmt.Errorf("timeout after %v", r.containerReadyTimeout)
+		case <-ticker.C:
+			if r.isContainerReady() {
+				return nil
+			}
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
-	return nil
 }
 
 /******************************************
  * Container Management Methods
  ******************************************/
 
+// requestRestart initiates container restart with cooldown protection
+func (r *Renderer) requestRestart() bool {
+	r.restartMutex.Lock()
+	defer r.restartMutex.Unlock()
+
+	// Проверка cooldown
+	if time.Since(r.lastRestart) < restartCooldown {
+		r.logger.Warn("Restart skipped: cooldown period active")
+		return false
+	}
+
+	r.setRestarting(true)
+	go func() {
+		defer r.setRestarting(false)
+		if err := r.restartContainer(); err != nil {
+			r.logger.Errorf("Container restart failed: %v", err)
+		}
+	}()
+
+	return true
+}
+
 // restartContainer restarts the Chrome container
 func (r *Renderer) restartContainer() error {
 	r.restartMutex.Lock()
 	defer r.restartMutex.Unlock()
 
-	if time.Since(r.lastRestart) < restartCooldown {
-		r.logger.Warn("Restart skipped: still in cooldown period")
-		return nil
-	}
-
-	r.setRestarting(true)
-	defer r.setRestarting(false)
-
 	r.lastRestart = time.Now()
 	r.setContainerReady(false)
 
-	r.allocatorMutex.Lock()
-	if r.cancelAllocator != nil {
-		r.logger.Info("Canceling current allocator to interrupt active renders")
-		r.cancelAllocator()
-		r.cancelAllocator = nil
-		r.allocatorCtx = nil
-	}
-	r.allocatorMutex.Unlock()
-
-	r.logger.Info("Waiting for active requests to complete before restart...")
-	start := time.Now()
-	for atomic.LoadInt32(&r.activeRequests) > 0 {
-		if time.Since(start) > activeRequestsWaitLimit {
-			r.logger.Warn("Timeout waiting for active requests, proceeding with restart")
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+	r.CancelActiveRequests() // Немедленная отмена всех активных запросов
 
 	r.logger.Info("Restarting container...")
-
 	if err := r.containerManager.Restart(); err != nil {
 		r.logger.Errorf("Container restart failed: %v", err)
 		return err
 	}
 
-	if r.portChecker != nil && !r.portChecker.IsPortAvailable(r.debugPort) {
-		if rt.GOOS != "windows" {
-			r.logger.Warnf("Debug port %d is busy, killing processes...", r.debugPort)
-			cmd := r.commander.Command("fuser", "-k", fmt.Sprintf("%d/tcp", r.debugPort))
-			if err := cmd.Run(); err != nil {
-				r.logger.Errorf("Failed to kill processes: %v", err)
-			}
-		} else {
-			r.logger.Warn("Port cleanup skipped on Windows")
-		}
+	// Health check для Chrome
+	if err := r.waitForChromeReady(); err != nil {
+		r.logger.Errorf("Chrome health check failed: %v", err)
+		return err
 	}
 
 	wsURL, err := r.getDebugURLWithRetry()
@@ -789,6 +798,28 @@ func (r *Renderer) restartContainer() error {
 	} else {
 		r.logger.Warnf("Chrome verification failed: %v", err)
 		return ErrContainerRestart
+	}
+}
+
+// waitForChromeReady waits until Chrome is ready to accept connections
+func (r *Renderer) waitForChromeReady() error {
+	healthCheckURL := fmt.Sprintf("http://localhost:%d/json/version", r.debugPort)
+	timeout := time.After(r.containerReadyTimeout)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	r.logger.Info("Waiting for Chrome health check...")
+	for {
+		select {
+		case <-timeout:
+			return errors.New("chrome health check timeout")
+		case <-ticker.C:
+			resp, err := http.Get(healthCheckURL)
+			if err == nil && resp.StatusCode == http.StatusOK {
+				r.logger.Info("Chrome health check passed")
+				return nil
+			}
+		}
 	}
 }
 
