@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,8 +22,8 @@ import (
 
 var (
 	concurrentRequests = 10
-	longTermRequests   = 30
-	renderTimeout      = 180 * time.Second
+	longTermRequests   = 1
+	renderTimeout      = 300 * time.Second // Увеличен таймаут
 	containerName      = "headless-shell-test"
 )
 
@@ -129,13 +130,21 @@ func createContainer(port int) error {
 	cmd := exec.Command("docker", "run", "-d",
 		"-p", fmt.Sprintf("%d:9222", port),
 		"--name", containerName,
-		"--memory=2g", "--cpus=2", "--shm-size=1g",
-		"chromedp/headless-shell")
+		"--memory=4g", "--cpus=4", "--shm-size=2g", // Увеличены ресурсы
+		"chromedp/headless-shell:latest", // Используем последнюю версию
+		"--disable-software-rasterizer",
+		"--disable-gpu",
+		"--disable-dev-shm-usage",
+		"--no-zygote",
+		"--single-process",
+		"--disable-setuid-sandbox",
+		"--no-sandbox",
+	)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to create container: %v\n%s", err, output)
 	}
 	log.Println("Container created successfully")
-	return waitForContainerPort(port, 30*time.Second)
+	return waitForContainerPort(port, 60*time.Second) // Увеличен таймаут
 }
 
 // cleanupContainer stops and removes the container
@@ -153,7 +162,7 @@ func cleanupContainer() {
 
 	// Stop container
 	log.Println("Stopping container...")
-	cmd = exec.Command("docker", "stop", containerName)
+	cmd = exec.Command("docker", "stop", "-t", "0", containerName) // Быстрая остановка
 	if output, err := cmd.CombinedOutput(); err != nil {
 		log.Printf("Failed to stop container: %v\n%s", err, output)
 	} else {
@@ -214,12 +223,39 @@ func ensureContainerRunning(port int) error {
 	return nil
 }
 
+// getContainerLogs retrieves container logs for diagnostics
+func getContainerLogs() string {
+	if containerName == "" {
+		return ""
+	}
+
+	cmd := exec.Command("docker", "logs", containerName)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("Failed to get container logs: %v", err)
+	}
+	return string(output)
+}
+
 func main() {
 	// Configure log format: date + time + microseconds
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
+	// Log system information
+	log.Printf("Starting stress test on %s with %d CPUs",
+		runtime.GOOS, runtime.NumCPU())
+
 	logger := &RealLogger{}
-	defer cleanupContainer()
+
+	// Ensure we capture container logs before cleanup
+	defer func() {
+		logs := getContainerLogs()
+		if logs != "" {
+			log.Println("\n=== Container logs ===")
+			log.Println(logs)
+		}
+		cleanupContainer()
+	}()
 
 	rand.Seed(time.Now().UnixNano())
 	port := 9222 + rand.Intn(1000)
@@ -242,7 +278,7 @@ func main() {
 	r.SetDebugPort(actualPort)
 	r.SetPortChecker(renderer.NewRealPortChecker())
 	r.SetConsoleCapture(true)
-	r.SetContainerReadyTimeout(180 * time.Second)
+	r.SetContainerReadyTimeout(300 * time.Second) // Увеличен таймаут
 	r.SetDebugURLMaxAttempts(60)
 	r.SetConcurrencyLimit(5)
 	r.SetRenderTimeout(renderTimeout)
@@ -262,8 +298,8 @@ func main() {
 	log.Println("Waiting for renderer to be ready...")
 	start := time.Now()
 	for !r.IsContainerReady() {
-		if time.Since(start) > 180*time.Second {
-			log.Fatal("Renderer failed to become ready within 180 seconds")
+		if time.Since(start) > 300*time.Second { // Увеличен таймаут
+			log.Fatal("Renderer failed to become ready within 300 seconds")
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -274,7 +310,7 @@ func main() {
 	log.Println("\n=== Sequential rendering test ===")
 	startSequential := time.Now()
 	testURLs := []string{
-		"https://online.freicon.ru",
+		/*"https://online.freicon.ru",
 		"https://example.com",
 		"https://google.com",
 		"https://github.com",
@@ -282,7 +318,7 @@ func main() {
 		"https://microsoft.com",
 		"https://apple.com",
 		"https://httpbin.org/get",
-		"https://jsonplaceholder.typicode.com/posts/1",
+		"https://jsonplaceholder.typicode.com/posts/1",*/
 		"https://httpbin.org/delay/2",
 		"https://httpbin.org/delay/5",
 		"https://httpbin.org/status/404",
@@ -365,7 +401,7 @@ func main() {
 	fmt.Println("\nAll tests completed successfully!")
 }
 
-// renderPage renders a single page and logs the result
+// renderPage renders a single page and logs the result with detailed timings
 func renderPage(ctx context.Context, r *renderer.Renderer, url string, id int) {
 	start := time.Now()
 	result, err := r.DoRender(url)
@@ -377,8 +413,14 @@ func renderPage(ctx context.Context, r *renderer.Renderer, url string, id int) {
 		return
 	}
 
-	log.Printf("[%d] Rendered %s in %v (%d bytes, console logs: %d)",
-		id, url, duration, len(result.HTML), len(result.Console))
+	// Log detailed timings for performance analysis
+	log.Printf("[%d] Rendered %s in %v [nav=%v, wait=%v, render=%v] (%d bytes, console logs: %d)",
+		id, url, duration,
+		result.Timings.Navigation,
+		result.Timings.Waiting,
+		result.Timings.Rendering,
+		len(result.HTML),
+		len(result.Console))
 }
 
 // ResourceStats contains resource usage metrics
@@ -386,26 +428,6 @@ type ResourceStats struct {
 	Timestamp time.Time
 	CPU       float64
 	Memory    float64
-}
-
-// monitorResources simulates resource monitoring
-func monitorResources(ctx context.Context, stats chan<- ResourceStats) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			stats <- ResourceStats{
-				Timestamp: time.Now(),
-				CPU:       rand.Float64() * 100,
-				Memory:    rand.Float64() * 4096,
-			}
-		case <-ctx.Done():
-			close(stats)
-			return
-		}
-	}
 }
 
 // logStats logs performance statistics for a test

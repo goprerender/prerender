@@ -26,10 +26,10 @@ import (
 const (
 	defaultContainerName    = "headless-shell"
 	defaultDebugPort        = 9826
-	defaultRenderTimeout    = 180 * time.Second
+	defaultRenderTimeout    = 300 * time.Second // Увеличен таймаут
 	maxRestartAttempts      = 5
 	maxConcurrentRenders    = 10
-	containerReadyTimeout   = 180 * time.Second
+	containerReadyTimeout   = 300 * time.Second // Увеличен таймаут
 	restartCooldown         = 60 * time.Second
 	portCheckTimeout        = 10 * time.Second
 	activeRequestsWaitLimit = 10 * time.Second
@@ -95,6 +95,14 @@ type ContainerManager interface {
 	Restart() error
 }
 
+// RenderTimings contains detailed timing information for rendering
+type RenderTimings struct {
+	Navigation time.Duration // Time taken for page navigation
+	Waiting    time.Duration // Time spent waiting for page readiness
+	Rendering  time.Duration // Time taken to extract rendered HTML
+	Total      time.Duration // Total time for all rendering tasks
+}
+
 // RenderResult contains the results of a page render
 type RenderResult struct {
 	HTML       string         // Rendered HTML content
@@ -102,6 +110,7 @@ type RenderResult struct {
 	Exception  string         // JavaScript exceptions
 	TotalTime  time.Duration  // Total execution time
 	RenderTime time.Duration  // Rendering time
+	Timings    RenderTimings  // Detailed timing breakdown
 }
 
 // ConsoleEntry represents a browser console message
@@ -594,6 +603,8 @@ func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) 
 	}
 
 	var htmlContent string
+	timings := RenderTimings{}
+
 	tasks := chromedp.Tasks{
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			return network.SetBlockedURLs(r.blockedURLs).Do(ctx)
@@ -602,20 +613,36 @@ func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) 
 			return network.SetExtraHTTPHeaders(network.Headers{"X-Prerender": "1"}).Do(ctx)
 		}),
 		chromedp.ActionFunc(func(ctx context.Context) error {
+			start := time.Now()
 			_, _, _, err := page.Navigate(url).Do(ctx)
+			timings.Navigation = time.Since(start)
 			if err != nil && !strings.Contains(err.Error(), "net::ERR_BLOCKED_BY_CLIENT") {
 				return err
 			}
 			return nil
 		}),
-		chromedp.WaitReady(":root", chromedp.ByQuery, chromedp.AtLeast(0)),
-		chromedp.Sleep(2 * time.Second),
-		chromedp.OuterHTML("html", &htmlContent, chromedp.ByQuery),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			start := time.Now()
+			// Ожидаем появления body с таймаутом 30 секунд
+			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			err := chromedp.WaitVisible("body", chromedp.ByQuery).Do(waitCtx)
+			timings.Waiting = time.Since(start)
+			return err
+		}),
+		chromedp.Sleep(500 * time.Millisecond), // Небольшая задержка перед рендерингом
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			start := time.Now()
+			err := chromedp.OuterHTML("html", &htmlContent, chromedp.ByQuery).Do(ctx)
+			timings.Rendering = time.Since(start)
+			return err
+		}),
 	}
 
-	start := time.Now()
+	startRender := time.Now()
 	err := chromedp.Run(ctx, tasks)
-	result.RenderTime = time.Since(start)
+	timings.Total = time.Since(startRender)
+	result.Timings = timings
 
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -629,6 +656,15 @@ func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) 
 		}
 		return "", err
 	}
+
+	// Log detailed timings for performance analysis
+	r.logger.Infof("Render timings for %s: nav=%v, wait=%v, render=%v, total=%v",
+		url,
+		timings.Navigation,
+		timings.Waiting,
+		timings.Rendering,
+		timings.Total)
+
 	return htmlContent, nil
 }
 
@@ -775,6 +811,10 @@ func (r *Renderer) captureConsoleEvents(ctx context.Context, result *RenderResul
 			result.Console = append(result.Console, entry)
 		case *runtime.EventExceptionThrown:
 			result.Exception = ev.ExceptionDetails.Error()
+		case *network.EventResponseReceived:
+			r.logger.Debugf("Response: %s %d", ev.Response.URL, ev.Response.Status)
+		case *network.EventLoadingFailed:
+			r.logger.Warnf("Loading failed: %s", ev.ErrorText)
 		}
 	})
 }
@@ -782,6 +822,8 @@ func (r *Renderer) captureConsoleEvents(ctx context.Context, result *RenderResul
 func (r *Renderer) shouldRestart(err error) bool {
 	return strings.Contains(err.Error(), "could not dial \"ws:") ||
 		strings.Contains(err.Error(), "exec: \"google-chrome\":") ||
+		strings.Contains(err.Error(), "net::ERR_CONNECTION_REFUSED") ||
+		strings.Contains(err.Error(), "net::ERR_NAME_NOT_RESOLVED") ||
 		errors.Is(err, ErrInvalidContext) ||
 		errors.Is(err, ErrDOMNodeNotFound)
 }

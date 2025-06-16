@@ -86,3 +86,6 @@ fabric.properties
 /prerender
 /storage
 /worker
+cmd/text
+workflow/output
+workflow/console_logs.txt
