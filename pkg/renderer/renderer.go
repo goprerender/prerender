@@ -26,13 +26,13 @@ import (
 const (
 	defaultContainerName    = "headless-shell"
 	defaultDebugPort        = 9826
-	renderTimeout           = 120 * time.Second
+	defaultRenderTimeout    = 180 * time.Second
 	maxRestartAttempts      = 5
 	maxConcurrentRenders    = 10
 	containerReadyTimeout   = 180 * time.Second
 	restartCooldown         = 60 * time.Second
 	portCheckTimeout        = 10 * time.Second
-	activeRequestsWaitLimit = 5 * time.Second
+	activeRequestsWaitLimit = 10 * time.Second
 )
 
 // Ошибки сервиса
@@ -47,6 +47,7 @@ var (
 	ErrInvalidContext     = errors.New("invalid context")
 	ErrPortNotAvailable   = errors.New("debug port not available")
 	ErrChromeNotReady     = errors.New("chrome not ready")
+	ErrDOMNodeNotFound    = errors.New("DOM node not found")
 )
 
 // Logger интерфейс для унифицированного логирования
@@ -152,34 +153,50 @@ type Renderer struct {
 	debugURLMaxAttempts   int           // Макс. попыток получения debug URL
 	containerName         string        // Название контейнера
 	debugPort             int           // Порт для отладки Chrome
+	renderTimeout         time.Duration // Таймаут для рендеринга страницы
 }
 
 // DefaultLogger стандартная реализация логгера
 type DefaultLogger struct{}
 
+func (l *DefaultLogger) log(prefix string, args ...interface{}) {
+	log.Print("["+prefix+"] ", fmt.Sprint(args...))
+}
+
+func (l *DefaultLogger) logf(prefix, format string, args ...interface{}) {
+	log.Printf("["+prefix+"] "+format, args...)
+}
+
 func (l *DefaultLogger) Info(args ...interface{}) {
-	log.Println(append([]interface{}{"[INFO]"}, args...)...)
+	l.log("INFO", args...)
 }
+
 func (l *DefaultLogger) Infof(format string, args ...interface{}) {
-	log.Printf("[INFO] "+format, args...)
+	l.logf("INFO", format, args...)
 }
+
 func (l *DefaultLogger) Warn(args ...interface{}) {
-	log.Println(append([]interface{}{"[WARN]"}, args...)...)
+	l.log("WARN", args...)
 }
+
 func (l *DefaultLogger) Warnf(format string, args ...interface{}) {
-	log.Printf("[WARN] "+format, args...)
+	l.logf("WARN", format, args...)
 }
+
 func (l *DefaultLogger) Error(args ...interface{}) {
-	log.Println(append([]interface{}{"[ERROR]"}, args...)...)
+	l.log("ERROR", args...)
 }
+
 func (l *DefaultLogger) Errorf(format string, args ...interface{}) {
-	log.Printf("[ERROR] "+format, args...)
+	l.logf("ERROR", format, args...)
 }
+
 func (l *DefaultLogger) Debug(args ...interface{}) {
-	log.Println(append([]interface{}{"[DEBUG]"}, args...)...)
+	l.log("DEBUG", args...)
 }
+
 func (l *DefaultLogger) Debugf(format string, args ...interface{}) {
-	log.Printf("[DEBUG] "+format, args...)
+	l.logf("DEBUG", format, args...)
 }
 
 // RealCommander реализация для работы с ОС
@@ -208,12 +225,10 @@ func (a *RealAllocatorCreator) CreateRemoteAllocator(ctx context.Context, url st
 }
 
 // RealPortChecker проверка портов через net.Dial
-type RealPortChecker struct {
-	IsRunning bool
-}
+type RealPortChecker struct{}
 
 func NewRealPortChecker() *RealPortChecker {
-	return &RealPortChecker{IsRunning: true}
+	return &RealPortChecker{}
 }
 
 func (c *RealPortChecker) IsPortAvailable(port int) bool {
@@ -302,6 +317,7 @@ func NewRenderer(logger Logger, commander Commander, httpClient HTTPClient) *Ren
 		portChecker:           &RealPortChecker{},
 		containerName:         defaultContainerName,
 		debugPort:             defaultDebugPort,
+		renderTimeout:         defaultRenderTimeout,
 	}
 	r.resetReadyCh()
 	r.pageRenderer = r
@@ -375,6 +391,11 @@ func (r *Renderer) SetDebugPort(port int) {
 	if manager, ok := r.containerManager.(*DockerContainerManager); ok {
 		manager.debugPort = port
 	}
+}
+
+// SetRenderTimeout устанавливает таймаут для рендеринга страницы
+func (r *Renderer) SetRenderTimeout(timeout time.Duration) {
+	r.renderTimeout = timeout
 }
 
 // GetContainerName возвращает название контейнера
@@ -552,7 +573,7 @@ func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) 
 	tabCtx, cancelTab := chromedp.NewContext(r.allocatorCtx)
 	defer cancelTab()
 
-	ctx, cancel := context.WithTimeout(tabCtx, renderTimeout)
+	ctx, cancel := context.WithTimeout(tabCtx, r.renderTimeout)
 	defer cancel()
 
 	if r.captureConsoleLog {
@@ -574,8 +595,8 @@ func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) 
 			}
 			return nil
 		}),
-		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.Sleep(1 * time.Second),
+		chromedp.WaitReady("body", chromedp.ByQuery, chromedp.AtLeast(0)),
+		chromedp.Sleep(2 * time.Second),
 		chromedp.OuterHTML("html", &htmlContent, chromedp.ByQuery),
 	}
 
@@ -589,6 +610,9 @@ func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) 
 		}
 		if strings.Contains(err.Error(), "ERR_NAME_NOT_RESOLVED") {
 			return "", ErrNameNotResolved
+		}
+		if strings.Contains(err.Error(), "No node with given id found") {
+			return "", ErrDOMNodeNotFound
 		}
 		return "", err
 	}
@@ -748,7 +772,8 @@ func (r *Renderer) captureConsoleEvents(ctx context.Context, result *RenderResul
 func (r *Renderer) shouldRestart(err error) bool {
 	return strings.Contains(err.Error(), "could not dial \"ws:") ||
 		strings.Contains(err.Error(), "exec: \"google-chrome\":") ||
-		errors.Is(err, ErrInvalidContext)
+		errors.Is(err, ErrInvalidContext) ||
+		errors.Is(err, ErrDOMNodeNotFound)
 }
 
 func (r *Renderer) verifyChromeConnection() error {

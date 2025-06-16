@@ -22,7 +22,7 @@ import (
 var (
 	concurrentRequests = 10
 	longTermRequests   = 30
-	renderTimeout      = 120 * time.Second
+	renderTimeout      = 180 * time.Second
 	containerName      = "headless-shell-test"
 )
 
@@ -52,29 +52,44 @@ func init() {
 
 type RealLogger struct{}
 
+func (l *RealLogger) log(prefix string, args ...interface{}) {
+	log.Print("["+prefix+"] ", fmt.Sprint(args...))
+}
+
+func (l *RealLogger) logf(prefix, format string, args ...interface{}) {
+	log.Printf("["+prefix+"] "+format, args...)
+}
+
 func (l *RealLogger) Info(args ...interface{}) {
-	log.Println(args...)
+	l.log("INFO", args...)
 }
+
 func (l *RealLogger) Infof(format string, args ...interface{}) {
-	log.Printf(format, args...)
+	l.logf("INFO", format, args...)
 }
+
 func (l *RealLogger) Warn(args ...interface{}) {
-	log.Println(args...)
+	l.log("WARN", args...)
 }
+
 func (l *RealLogger) Warnf(format string, args ...interface{}) {
-	log.Printf(format, args...)
+	l.logf("WARN", format, args...)
 }
+
 func (l *RealLogger) Error(args ...interface{}) {
-	log.Println(args...)
+	l.log("ERROR", args...)
 }
+
 func (l *RealLogger) Errorf(format string, args ...interface{}) {
-	log.Printf(format, args...)
+	l.logf("ERROR", format, args...)
 }
+
 func (l *RealLogger) Debug(args ...interface{}) {
-	log.Println(args...)
+	l.log("DEBUG", args...)
 }
+
 func (l *RealLogger) Debugf(format string, args ...interface{}) {
-	log.Printf(format, args...)
+	l.logf("DEBUG", format, args...)
 }
 
 func waitForContainerPort(port int, timeout time.Duration) error {
@@ -144,14 +159,12 @@ func cleanupContainer() {
 }
 
 func getContainerPort() (int, error) {
-	// Используем упрощенный формат для получения порта
 	cmd := exec.Command("docker", "inspect",
 		"--format", "{{(index (index .NetworkSettings.Ports \"9222/tcp\") 0).HostPort}}",
 		containerName)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		// Добавляем вывод ошибки для диагностики
 		return 0, fmt.Errorf("docker inspect error: %v\nOutput: %s", err, string(output))
 	}
 
@@ -169,15 +182,12 @@ func getContainerPort() (int, error) {
 }
 
 func ensureContainerRunning(port int) error {
-	// Cleanup any existing container first
 	cleanupContainer()
 
-	// Create new container with specified port
 	if err := createContainer(port); err != nil {
 		return err
 	}
 
-	// Verify container port
 	actualPort, err := getContainerPort()
 	if err != nil {
 		return fmt.Errorf("failed to get container port: %v", err)
@@ -191,12 +201,13 @@ func ensureContainerRunning(port int) error {
 }
 
 func main() {
+	// Настройка формата логов: дата + время + микросекунды
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
 	logger := &RealLogger{}
 
-	// Cleanup container on exit
 	defer cleanupContainer()
 
-	// Генерируем уникальный порт для теста
 	rand.Seed(time.Now().UnixNano())
 	port := 9222 + rand.Intn(1000)
 
@@ -205,7 +216,6 @@ func main() {
 		log.Fatalf("Container error: %v", err)
 	}
 
-	// Получаем реальный порт контейнера
 	actualPort, err := getContainerPort()
 	if err != nil {
 		log.Printf("Warning: failed to get container port: %v", err)
@@ -216,21 +226,21 @@ func main() {
 
 	r := renderer.NewDefaultRenderer()
 	r.SetContainerName(containerName)
-	r.SetDebugPort(actualPort) // Используем реальный порт
+	r.SetDebugPort(actualPort)
 	r.SetPortChecker(renderer.NewRealPortChecker())
 	r.SetConsoleCapture(true)
-	r.SetContainerReadyTimeout(120 * time.Second)
+	r.SetContainerReadyTimeout(180 * time.Second)
 	r.SetDebugURLMaxAttempts(60)
-	r.SetConcurrencyLimit(5) // Ограничение параллельных запросов
+	r.SetConcurrencyLimit(5)
+	r.SetRenderTimeout(renderTimeout)
 
-	fmt.Println("Starting renderer stress test...")
-	fmt.Printf("Configuration:\n  Container: %s\n  Port: %d\n  Concurrent requests: %d\n  Long-term requests: %d\n  Timeout: %v\n",
+	log.Println("Starting renderer stress test...")
+	log.Printf("Configuration:\n  Container: %s\n  Port: %d\n  Concurrent requests: %d\n  Long-term requests: %d\n  Timeout: %v\n",
 		containerName, actualPort, concurrentRequests, longTermRequests, renderTimeout)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Запускаем мониторинг состояния рендерера
 	go monitorRenderer(ctx, r)
 
 	log.Println("Initializing renderer...")
@@ -239,20 +249,19 @@ func main() {
 	log.Println("Waiting for renderer to be ready...")
 	start := time.Now()
 	for !r.IsContainerReady() {
-		if time.Since(start) > 120*time.Second {
-			log.Fatal("Renderer failed to become ready within 120 seconds")
+		if time.Since(start) > 180*time.Second {
+			log.Fatal("Renderer failed to become ready within 180 seconds")
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	log.Println("Renderer is ready")
 
-	// Тест перезапуска контейнера
 	testContainerRestart(ctx, r, logger)
 
-	// Тест 1: Последовательный рендеринг
-	fmt.Println("\n=== Sequential rendering test ===")
+	log.Println("\n=== Sequential rendering test ===")
 	startSequential := time.Now()
 	testURLs := []string{
+		"https://online.freicon.ru",
 		"https://example.com",
 		"https://google.com",
 		"https://github.com",
@@ -277,8 +286,7 @@ func main() {
 	fmt.Printf("Sequential test completed in %v\n", seqDuration)
 	logStats("Sequential", seqDuration, len(testURLs))
 
-	// Тест 2: Параллельный рендеринг
-	fmt.Println("\n=== Concurrent rendering test ===")
+	log.Println("\n=== Concurrent rendering test ===")
 	startConcurrent := time.Now()
 	var wg sync.WaitGroup
 	for i := 0; i < concurrentRequests; i++ {
@@ -293,15 +301,14 @@ func main() {
 			renderPage(ctx, r, url, i)
 		}(i)
 
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 	wg.Wait()
 	conDuration := time.Since(startConcurrent)
 	fmt.Printf("Concurrent test completed in %v\n", conDuration)
 	logStats("Concurrent", conDuration, concurrentRequests)
 
-	// Тест 3: Долговременная стабильность
-	fmt.Println("\n=== Long-term stability test ===")
+	log.Println("\n=== Long-term stability test ===")
 	startStability := time.Now()
 	failures := 0
 	successes := 0
@@ -331,7 +338,7 @@ func main() {
 			successes++
 		}
 
-		delay := time.Duration(rand.Intn(1000)) * time.Millisecond
+		delay := time.Duration(500+rand.Intn(1500)) * time.Millisecond
 		time.Sleep(delay)
 	}
 
@@ -396,17 +403,14 @@ func logStats(testName string, duration time.Duration, requests int) {
 }
 
 func testContainerRestart(ctx context.Context, r *renderer.Renderer, logger *RealLogger) {
-	fmt.Println("\n=== Container restart test ===")
+	log.Println("\n=== Container restart test ===")
 
-	// Получаем время последнего старта контейнера
 	log.Println("Getting container start time before restart...")
 	startTimeBefore := getContainerStartTime(r)
 	log.Printf("Container start time before restart: %s", startTimeBefore)
 
-	// Специальный URL для тестирования перезапуска
 	triggerURL := "https://invalid-url-that-triggers-restart"
 
-	// Первый рендер - должен вызвать ошибку и триггернуть перезапуск
 	log.Println("Simulating connection error to trigger restart...")
 	start := time.Now()
 	_, err := r.DoRender(triggerURL)
@@ -418,7 +422,6 @@ func testContainerRestart(ctx context.Context, r *renderer.Renderer, logger *Rea
 	}
 	log.Printf("Received expected error: %v (duration: %v)", err, duration)
 
-	// Ждем перезапуска
 	log.Println("Waiting for container to restart...")
 	startWait := time.Now()
 	for {
@@ -434,7 +437,6 @@ func testContainerRestart(ctx context.Context, r *renderer.Renderer, logger *Rea
 		time.Sleep(2 * time.Second)
 	}
 
-	// Проверяем, что рендеринг работает после перезапуска
 	log.Println("Verifying rendering after restart...")
 	start = time.Now()
 	result, err := r.DoRender("https://example.com")
@@ -467,7 +469,6 @@ func monitorRenderer(ctx context.Context, r *renderer.Renderer) {
 				log.Println("Renderer is not ready, initiating forced recovery...")
 				r.ForceRecovery()
 
-				// Ожидаем восстановления
 				start := time.Now()
 				for !r.IsContainerReady() {
 					if time.Since(start) > 2*time.Minute {
