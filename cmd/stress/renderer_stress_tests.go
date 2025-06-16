@@ -23,7 +23,7 @@ var (
 	concurrentRequests = 10
 	longTermRequests   = 30
 	renderTimeout      = 120 * time.Second
-	containerName      = "headless-shell"
+	containerName      = "headless-shell-test"
 )
 
 func init() {
