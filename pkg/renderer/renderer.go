@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os/exec"
@@ -21,69 +22,11 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-// Commander интерфейс для работы с системными командами
-type Commander interface {
-	LookPath(file string) (string, error)
-	Command(name string, arg ...string) *exec.Cmd
-}
-
-// RealCommander реализация Commander для реального окружения
-type RealCommander struct{}
-
-func (c *RealCommander) LookPath(file string) (string, error) {
-	return exec.LookPath(file)
-}
-
-func (c *RealCommander) Command(name string, arg ...string) *exec.Cmd {
-	return exec.Command(name, arg...)
-}
-
-// HTTPClient интерфейс для HTTP-клиента
-type HTTPClient interface {
-	Do(req *http.Request) (*http.Response, error)
-}
-
-// RealHTTPClient реализация HTTPClient для реального окружения
-type RealHTTPClient struct{}
-
-func (c *RealHTTPClient) Do(req *http.Request) (*http.Response, error) {
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-	return client.Do(req)
-}
-
-// Logger интерфейс для логирования
-type Logger interface {
-	Info(args ...interface{})
-	Infof(format string, args ...interface{})
-	Warn(args ...interface{})
-	Warnf(format string, args ...interface{})
-	Error(args ...interface{})
-	Errorf(format string, args ...interface{})
-	Debug(args ...interface{})
-	Debugf(format string, args ...interface{})
-}
-
-// AllocatorCreator интерфейс для создания аллокатора
-type AllocatorCreator interface {
-	CreateRemoteAllocator(ctx context.Context, url string) (context.Context, context.CancelFunc)
-}
-
-// RealAllocatorCreator реализация AllocatorCreator для реального окружения
-type RealAllocatorCreator struct{}
-
-func (a *RealAllocatorCreator) CreateRemoteAllocator(ctx context.Context, url string) (context.Context, context.CancelFunc) {
-	return chromedp.NewRemoteAllocator(ctx, url)
-}
-
-// Constants
+// Константы сервиса
 const (
 	containerName         = "headless-shell"
 	debugURL              = "http://localhost:9222/json/version"
 	renderTimeout         = 120 * time.Second
-	containerStartDelay   = 30 * time.Second
-	containerReadyDelay   = 5 * time.Second
 	maxRestartAttempts    = 5
 	dockerHealthCheckCmd  = "docker inspect -f '{{.State.Status}}' " + containerName
 	maxConcurrentRenders  = 10
@@ -92,7 +35,7 @@ const (
 	portCheckTimeout      = 10 * time.Second
 )
 
-// Errors
+// Ошибки сервиса
 var (
 	ErrNotResponding      = errors.New("chrome not responding")
 	ErrNameNotResolved    = errors.New("domain name not resolved")
@@ -106,7 +49,35 @@ var (
 	ErrChromeNotReady     = errors.New("chrome not ready")
 )
 
-// PortChecker интерфейс для проверки портов
+// Logger интерфейс для унифицированного логирования
+type Logger interface {
+	Info(args ...interface{})
+	Infof(format string, args ...interface{})
+	Warn(args ...interface{})
+	Warnf(format string, args ...interface{})
+	Error(args ...interface{})
+	Errorf(format string, args ...interface{})
+	Debug(args ...interface{})
+	Debugf(format string, args ...interface{})
+}
+
+// Commander интерфейс для работы с системными командами
+type Commander interface {
+	LookPath(file string) (string, error)
+	Command(name string, arg ...string) *exec.Cmd
+}
+
+// HTTPClient интерфейс для HTTP-запросов
+type HTTPClient interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
+// AllocatorCreator интерфейс для создания контекста Chrome
+type AllocatorCreator interface {
+	CreateRemoteAllocator(ctx context.Context, url string) (context.Context, context.CancelFunc)
+}
+
+// PortChecker интерфейс для проверки доступности портов
 type PortChecker interface {
 	IsPortAvailable(port int) bool
 }
@@ -116,56 +87,129 @@ type PageRenderer interface {
 	RenderPage(url string, result *RenderResult) (string, error)
 }
 
-// Renderer структура для управления процессом рендеринга
-type Renderer struct {
-	allocatorCtx          context.Context
-	cancelAllocator       context.CancelFunc
-	isRemote              bool
-	isStarted             bool
-	mutex                 sync.RWMutex
-	restartMutex          sync.Mutex
-	logger                Logger
-	dockerPath            string
-	lastRestart           time.Time
-	captureConsoleLog     bool
-	blockedURLs           []string
-	restartingFlag        bool
-	wsURL                 string
-	semaphore             chan struct{}
-	readyCh               chan struct{}
-	readyMutex            sync.Mutex
-	containerReady        bool
-	restartQueue          chan struct{}
-	allocatorMutex        sync.RWMutex
-	commander             Commander
-	httpClient            HTTPClient
-	containerReadyTimeout time.Duration
-	containerStartDelay   time.Duration
-	debugURLRetryDelay    time.Duration
-	debugURLMaxAttempts   int
-	portChecker           PortChecker
-	sleeper               func(d time.Duration)
-	pageRenderer          PageRenderer // Стратегия рендеринга страниц
-	allocatorCreator      AllocatorCreator
-	activeRequests        int32 // Используем атомарный счетчик
-}
-
-// RenderResult результат рендеринга
+// RenderResult содержит результаты рендеринга
 type RenderResult struct {
-	HTML       string
-	Console    []ConsoleEntry
-	Exception  string
-	TotalTime  time.Duration
-	RenderTime time.Duration
+	HTML       string         // HTML-содержимое страницы
+	Console    []ConsoleEntry // Записи консоли браузера
+	Exception  string         // Исключения JavaScript
+	TotalTime  time.Duration  // Общее время выполнения
+	RenderTime time.Duration  // Время непосредственно рендеринга
 }
 
-// ConsoleEntry запись консоли
+// ConsoleEntry представляет запись в консоли браузера
 type ConsoleEntry struct {
-	Type     string
-	Messages []string
+	Type     string   // Тип записи (log, error, warning)
+	Messages []string // Сообщения
 }
 
-// NewRenderer создает новый экземпляр Renderer
+// Renderer основной сервис рендеринга
+type Renderer struct {
+	// Состояние рендерера
+	mutex          sync.Mutex // Защита общего состояния
+	isStarted      bool       // Флаг инициализации
+	restartingFlag bool       // Флаг выполнения перезапуска
+	containerReady bool       // Флаг готовности контейнера
+
+	// Контекст Chrome
+	allocatorCtx    context.Context    // Контекст для Chrome DevTools
+	cancelAllocator context.CancelFunc // Функция отмены контекста
+	wsURL           string             // WebSocket URL для Chrome
+	allocatorMutex  sync.RWMutex       // Мьютекс для аллокатора
+
+	// Управление параллелизмом
+	semaphore      chan struct{} // Семафор для ограничения параллелизма
+	restartQueue   chan struct{} // Очередь перезапусков
+	activeRequests int32         // Счетчик активных запросов
+	restartMutex   sync.Mutex    // Мьютекс для синхронизации перезапуска
+
+	// Каналы и блокировки
+	readyCh    chan struct{} // Канал готовности контейнера
+	readyMutex sync.Mutex    // Мьютекс для readyCh
+
+	// Внешние зависимости
+	logger           Logger           // Логгер
+	commander        Commander        // Исполнитель команд
+	httpClient       HTTPClient       // HTTP-клиент
+	portChecker      PortChecker      // Проверка портов
+	pageRenderer     PageRenderer     // Рендерер страниц
+	allocatorCreator AllocatorCreator // Создатель контекста Chrome
+
+	// Конфигурация
+	dockerPath            string        // Путь к Docker
+	lastRestart           time.Time     // Время последнего перезапуска
+	captureConsoleLog     bool          // Флаг захвата логов консоли
+	blockedURLs           []string      // Блокируемые URL (трекинг, реклама)
+	containerReadyTimeout time.Duration // Таймаут готовности контейнера
+	debugURLRetryDelay    time.Duration // Задержка между попытками
+	debugURLMaxAttempts   int           // Макс. попыток получения debug URL
+}
+
+// DefaultLogger стандартная реализация логгера
+type DefaultLogger struct{}
+
+func (l *DefaultLogger) Info(args ...interface{}) {
+	log.Println(append([]interface{}{"[INFO]"}, args...)...)
+}
+func (l *DefaultLogger) Infof(format string, args ...interface{}) {
+	log.Printf("[INFO] "+format, args...)
+}
+func (l *DefaultLogger) Warn(args ...interface{}) {
+	log.Println(append([]interface{}{"[WARN]"}, args...)...)
+}
+func (l *DefaultLogger) Warnf(format string, args ...interface{}) {
+	log.Printf("[WARN] "+format, args...)
+}
+func (l *DefaultLogger) Error(args ...interface{}) {
+	log.Println(append([]interface{}{"[ERROR]"}, args...)...)
+}
+func (l *DefaultLogger) Errorf(format string, args ...interface{}) {
+	log.Printf("[ERROR] "+format, args...)
+}
+func (l *DefaultLogger) Debug(args ...interface{}) {
+	log.Println(append([]interface{}{"[DEBUG]"}, args...)...)
+}
+func (l *DefaultLogger) Debugf(format string, args ...interface{}) {
+	log.Printf("[DEBUG] "+format, args...)
+}
+
+// RealCommander реализация для работы с ОС
+type RealCommander struct{}
+
+func (c *RealCommander) LookPath(file string) (string, error) {
+	return exec.LookPath(file)
+}
+func (c *RealCommander) Command(name string, arg ...string) *exec.Cmd {
+	return exec.Command(name, arg...)
+}
+
+// RealHTTPClient стандартная реализация HTTP-клиента
+type RealHTTPClient struct{}
+
+func (c *RealHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	return client.Do(req)
+}
+
+// RealAllocatorCreator реализация для работы с Chrome DevTools
+type RealAllocatorCreator struct{}
+
+func (a *RealAllocatorCreator) CreateRemoteAllocator(ctx context.Context, url string) (context.Context, context.CancelFunc) {
+	return chromedp.NewRemoteAllocator(ctx, url)
+}
+
+// RealPortChecker проверка портов через net.Dial
+type RealPortChecker struct{}
+
+func (c *RealPortChecker) IsPortAvailable(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), 1*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// NewRenderer создает новый экземпляр рендерера
 func NewRenderer(logger Logger, commander Commander, httpClient HTTPClient) *Renderer {
 	r := &Renderer{
 		logger: logger,
@@ -183,14 +227,22 @@ func NewRenderer(logger Logger, commander Commander, httpClient HTTPClient) *Ren
 		commander:             commander,
 		httpClient:            httpClient,
 		containerReadyTimeout: containerReadyTimeout,
-		containerStartDelay:   containerStartDelay,
 		debugURLRetryDelay:    1 * time.Second,
 		debugURLMaxAttempts:   20,
 		allocatorCreator:      &RealAllocatorCreator{},
 	}
 	r.resetReadyCh()
-	r.pageRenderer = r // Use self as default renderer
+	r.pageRenderer = r
 	return r
+}
+
+/******************************************
+ * Публичные методы для конфигурации
+ ******************************************/
+
+// SetBlockedURLs устанавливает пользовательский список блокируемых URL
+func (r *Renderer) SetBlockedURLs(urls []string) {
+	r.blockedURLs = urls
 }
 
 // SetPageRenderer устанавливает кастомный рендерер страниц
@@ -198,42 +250,70 @@ func (r *Renderer) SetPageRenderer(pr PageRenderer) {
 	r.pageRenderer = pr
 }
 
-func (r *Renderer) SetConcurrencyLimit(limit int) {
-	r.semaphore = make(chan struct{}, limit)
-}
-
-// SetPortChecker устанавливает PortChecker
+// SetPortChecker устанавливает кастомную проверку портов
 func (r *Renderer) SetPortChecker(pc PortChecker) {
 	r.portChecker = pc
 }
 
-func (r *Renderer) setContainerReady(ready bool) {
-	r.readyMutex.Lock()
-	defer r.readyMutex.Unlock()
-	if r.containerReady == ready {
-		return
-	}
-	r.containerReady = ready
-	if ready {
-		if r.readyCh != nil {
-			select {
-			case <-r.readyCh:
-			default:
-				close(r.readyCh)
-			}
-		}
-	} else {
-		r.resetReadyCh()
-	}
+// SetConcurrencyLimit устанавливает лимит параллельных запросов
+func (r *Renderer) SetConcurrencyLimit(limit int) {
+	r.semaphore = make(chan struct{}, limit)
 }
 
-func (r *Renderer) resetReadyCh() {
-	r.readyCh = make(chan struct{})
-}
-
-// SetConsoleCapture включает или выключает захват консоли
+// SetConsoleCapture включает/выключает захват логов консоли
 func (r *Renderer) SetConsoleCapture(enabled bool) {
 	r.captureConsoleLog = enabled
+}
+
+// SetContainerReadyTimeout устанавливает таймаут готовности контейнера
+func (r *Renderer) SetContainerReadyTimeout(timeout time.Duration) {
+	r.containerReadyTimeout = timeout
+}
+
+// SetDebugURLMaxAttempts устанавливает количество попыток получения debug URL
+func (r *Renderer) SetDebugURLMaxAttempts(attempts int) {
+	r.debugURLMaxAttempts = attempts
+}
+
+/******************************************
+ * Основные публичные методы
+ ******************************************/
+
+// Setup инициализирует рендерер
+func (r *Renderer) Setup() {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	if r.isStarted {
+		r.logger.Info("Renderer already initialized")
+		return
+	}
+
+	r.logger.Info("Initializing renderer...")
+	r.logger.Info("Setting up container...")
+	if err := r.setupContainer(); err != nil {
+		r.logger.Errorf("Container setup error: %v", err)
+	}
+
+	r.logger.Info("Connecting to Chrome...")
+	wsURL, err := r.getDebugURLWithRetry()
+	if err == nil {
+		r.logger.Infof("Using Chrome debug URL: %s", wsURL)
+		r.setRemoteAllocator(wsURL)
+
+		if err := r.verifyChromeConnection(); err == nil {
+			r.setContainerReady(true)
+			r.logger.Info("Connected to Chrome via remote allocator")
+		} else {
+			r.logger.Errorf("Chrome connection verification failed: %v", err)
+		}
+	} else {
+		r.logger.Error("Failed to connect to Chrome container")
+		r.logger.Errorf("Connection error: %v", err)
+		r.setContainerReady(false)
+	}
+
+	r.isStarted = true
 }
 
 // DoRender выполняет рендеринг страницы
@@ -242,13 +322,11 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 	result := &RenderResult{}
 	startTime := time.Now()
 
-	// Проверяем валидность URL
 	if !isValidURL(requestURL) {
 		return nil, fmt.Errorf("invalid URL: %s", requestURL)
 	}
 
 	if err := r.waitForContainerReady(); err != nil {
-		r.logger.Errorf("Container not ready: %v", err)
 		return nil, fmt.Errorf("%w: %v", ErrContainerNotReady, err)
 	}
 
@@ -262,7 +340,8 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 		if r.isRestarting() {
 			waitTime := time.Until(r.lastRestart.Add(restartCooldown))
 			if waitTime > 0 {
-				r.logger.Warnf("Container restart in progress, waiting %v... (attempt %d/%d)", waitTime, attempt, maxAttempts)
+				r.logger.Warnf("Container restart in progress, waiting %v... (attempt %d/%d)",
+					waitTime, attempt, maxAttempts)
 				select {
 				case <-time.After(waitTime):
 					r.setRestarting(false)
@@ -280,7 +359,6 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 		}
 
 		if errors.Is(err, context.Canceled) {
-			r.logger.Warnf("Render canceled for %s: %v", requestURL, err)
 			return nil, ErrContextCanceled
 		}
 
@@ -314,14 +392,29 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 	return nil, fmt.Errorf("%w: all attempts failed for %s", ErrNotResponding, requestURL)
 }
 
-// Вспомогательная функция для проверки URL
-func isValidURL(url string) bool {
-	return strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
+// IsContainerReady проверяет готовность контейнера
+func (r *Renderer) IsContainerReady() bool {
+	r.readyMutex.Lock()
+	defer r.readyMutex.Unlock()
+	return r.containerReady
 }
 
-// RenderPage реализация PageRenderer для рендеринга страниц
+// Cancel прерывает все операции рендерера
+func (r *Renderer) Cancel() {
+	r.allocatorMutex.Lock()
+	defer r.allocatorMutex.Unlock()
+
+	if r.cancelAllocator != nil {
+		r.cancelAllocator()
+	}
+}
+
+/******************************************
+ * Реализация PageRenderer (по умолчанию)
+ ******************************************/
+
+// RenderPage реализует рендеринг через Chrome DevTools Protocol
 func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) {
-	// Специальный URL для тестирования перезапуска контейнера
 	if url == "https://invalid-url-that-triggers-restart" {
 		return "", errors.New("artificial error: could not dial \"ws:")
 	}
@@ -358,9 +451,8 @@ func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) 
 			}
 			return nil
 		}),
-		// Добавляем проверку загрузки страницы
 		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.Sleep(1 * time.Second), // Дополнительное время для JS
+		chromedp.Sleep(1 * time.Second),
 		chromedp.OuterHTML("html", &htmlContent, chromedp.ByQuery),
 	}
 
@@ -372,9 +464,6 @@ func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) 
 		if errors.Is(err, context.DeadlineExceeded) {
 			return "", ErrTimeoutExceeded
 		}
-		if errors.Is(err, context.Canceled) {
-			return "", context.Canceled
-		}
 		if strings.Contains(err.Error(), "ERR_NAME_NOT_RESOLVED") {
 			return "", ErrNameNotResolved
 		}
@@ -383,142 +472,88 @@ func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) 
 	return htmlContent, nil
 }
 
-// waitForContainerReady ожидает готовности контейнера
-func (r *Renderer) waitForContainerReady() error {
-	start := time.Now()
-	waitTime := 10 * time.Millisecond
+/******************************************
+ * Приватные методы управления состоянием
+ ******************************************/
 
-	for {
-		if r.isContainerReady() {
-			return nil
+func (r *Renderer) setContainerReady(ready bool) {
+	r.readyMutex.Lock()
+	defer r.readyMutex.Unlock()
+	r.containerReady = ready
+	if ready {
+		select {
+		case <-r.readyCh:
+		default:
+			close(r.readyCh)
 		}
-
-		if time.Since(start) > r.containerReadyTimeout {
-			return fmt.Errorf("timeout after %v", r.containerReadyTimeout)
-		}
-
-		r.logger.Warnf("Container not ready, waiting %v...", waitTime)
-		if r.sleeper != nil {
-			r.sleeper(waitTime)
-		} else {
-			time.Sleep(waitTime)
-		}
-
-		newWaitTime := waitTime * 2
-		if newWaitTime > 500*time.Millisecond {
-			newWaitTime = 500 * time.Millisecond
-		}
-		waitTime = newWaitTime
+	} else {
+		r.resetReadyCh()
 	}
 }
 
-// isContainerReady проверяет готовность контейнера
+func (r *Renderer) resetReadyCh() {
+	r.readyCh = make(chan struct{})
+}
+
 func (r *Renderer) isContainerReady() bool {
 	r.readyMutex.Lock()
 	defer r.readyMutex.Unlock()
 	return r.containerReady
 }
 
-// captureConsoleEvents захватывает события консоли
-func (r *Renderer) captureConsoleEvents(ctx context.Context, result *RenderResult) {
-	chromedp.ListenTarget(ctx, func(ev interface{}) {
-		switch ev := ev.(type) {
-		case *runtime.EventConsoleAPICalled:
-			entry := ConsoleEntry{Type: ev.Type.String()}
-			for _, arg := range ev.Args {
-				var msg string
-				if arg.Description != "" {
-					msg = arg.Description
-				} else if arg.Value != nil {
-					msg = fmt.Sprintf("%v", arg.Value)
-				} else {
-					msg = fmt.Sprintf("(%s)", arg.Type)
-				}
-				entry.Messages = append(entry.Messages, msg)
-			}
-			result.Console = append(result.Console, entry)
-			r.logger.Debugf("Console.%s: %v", entry.Type, entry.Messages)
+func (r *Renderer) setRestarting(state bool) {
+	r.restartingFlag = state
+}
 
-		case *runtime.EventExceptionThrown:
-			result.Exception = ev.ExceptionDetails.Error()
-			r.logger.Errorf("Exception: %s", result.Exception)
+func (r *Renderer) isRestarting() bool {
+	return r.restartingFlag
+}
 
-		default:
-			// Игнорируем неизвестные события
-			return
+func (r *Renderer) waitForContainerReady() error {
+	start := time.Now()
+	for !r.isContainerReady() {
+		if time.Since(start) > r.containerReadyTimeout {
+			return fmt.Errorf("timeout after %v", r.containerReadyTimeout)
 		}
-	})
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil
 }
 
-// shouldRestart определяет, нужно ли перезапускать контейнер
-func (r *Renderer) shouldRestart(err error) bool {
-	return strings.Contains(err.Error(), "could not dial \"ws:") ||
-		strings.Contains(err.Error(), "exec: \"google-chrome\":") ||
-		errors.Is(err, ErrInvalidContext)
-}
+/******************************************
+ * Методы управления контейнером
+ ******************************************/
 
-// Setup настраивает рендерер
-func (r *Renderer) Setup() {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
+func (r *Renderer) setupContainer() error {
+	path, err := r.commander.LookPath("docker")
+	if err != nil {
+		return err
+	}
+	r.dockerPath = path
 
-	if r.isStarted {
-		r.logger.Info("Renderer already initialized")
-		return
+	status := r.getContainerStatus()
+	if status == "running" {
+		return nil
 	}
 
-	r.logger.Info("Initializing renderer...")
-	r.logger.Info("Setting up container...")
-	if err := r.setupContainer(); err != nil {
-		r.logger.Errorf("Container setup error: %v", err)
+	time.Sleep(5 * time.Second)
+	status = r.getContainerStatus()
+	if status != "running" {
+		return fmt.Errorf("container status: %s", status)
 	}
+	return nil
+}
 
-	r.logger.Info("Connecting to Chrome...")
-	wsURL, err := r.getDebugURLWithRetry()
-	if err == nil {
-		r.logger.Infof("Using Chrome debug URL: %s", wsURL)
-		r.setRemoteAllocator(wsURL)
-		r.setContainerReady(true)
-		r.logger.Info("Connected to Chrome via remote allocator")
-	} else {
-		r.logger.Error("Failed to connect to Chrome container")
-		r.logger.Errorf("Connection error: %v", err)
-		r.setContainerReady(false)
+func (r *Renderer) getContainerStatus() string {
+	cmd := r.commander.Command("sh", "-c", dockerHealthCheckCmd)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "unknown"
 	}
+	return strings.Trim(string(output), "' \n")
 }
 
-func (r *Renderer) SetContainerReadyTimeout(timeout time.Duration) {
-	r.containerReadyTimeout = timeout
-}
-
-func (r *Renderer) SetDebugURLMaxAttempts(attempts int) {
-	r.debugURLMaxAttempts = attempts
-}
-
-func (r *Renderer) IsContainerReady() bool {
-	r.readyMutex.Lock()
-	defer r.readyMutex.Unlock()
-	return r.containerReady
-}
-
-// setRemoteAllocator устанавливает удаленный аллокатор
-func (r *Renderer) setRemoteAllocator(wsURL string) {
-	r.allocatorMutex.Lock()
-	defer r.allocatorMutex.Unlock()
-
-	if r.cancelAllocator != nil {
-		r.cancelAllocator()
-	}
-
-	// Используем контекст без таймаута для создания аллокатора
-	allocatorCtx, cancelAlloc := r.allocatorCreator.CreateRemoteAllocator(context.Background(), wsURL)
-	r.allocatorCtx = allocatorCtx
-	r.cancelAllocator = cancelAlloc
-	r.wsURL = wsURL
-	r.isRemote = true
-}
-
-// restartContainer перезапускает контейнер
+// restartContainer перезапускает контейнер Chrome
 func (r *Renderer) restartContainer() error {
 	r.restartMutex.Lock()
 	defer r.restartMutex.Unlock()
@@ -534,52 +569,47 @@ func (r *Renderer) restartContainer() error {
 	r.lastRestart = time.Now()
 	r.setContainerReady(false)
 
+	// Отменяем текущий контекст
+	r.allocatorMutex.Lock()
+	if r.cancelAllocator != nil {
+		r.logger.Info("Canceling current allocator to interrupt active renders")
+		r.cancelAllocator()
+		r.cancelAllocator = nil
+		r.allocatorCtx = nil
+	}
+	r.allocatorMutex.Unlock()
+
 	r.logger.Info("Waiting for active requests to complete before restart...")
-
-	// Ожидаем завершения активных запросов с таймаутом
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	completed := false
-	for !completed {
-		select {
-		case <-ctx.Done():
+	start := time.Now()
+	for atomic.LoadInt32(&r.activeRequests) > 0 {
+		if time.Since(start) > 30*time.Second {
 			r.logger.Warn("Timeout waiting for active requests, proceeding with restart")
-			completed = true
-		case <-ticker.C:
-			if atomic.LoadInt32(&r.activeRequests) == 1 {
-				r.logger.Info("All active requests completed")
-				completed = true
-			}
+			break
 		}
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	r.logger.Info("Restarting container...")
 
-	// ЗАМЕНА БЛОКА ОЧИСТКИ ПОРТА:
+	// Очистка порта (только для Linux)
 	if r.portChecker != nil && !r.portChecker.IsPortAvailable(9222) {
-		r.logger.Warn("Debug port 9222 is busy, attempting to kill processes...")
 		if rt.GOOS != "windows" {
+			r.logger.Warn("Debug port 9222 is busy, killing processes...")
 			cmd := r.commander.Command("fuser", "-k", "9222/tcp")
 			if err := cmd.Run(); err != nil {
 				r.logger.Errorf("Failed to kill processes: %v", err)
 			}
 		} else {
-			r.logger.Warn("Automatic port cleanup not supported on Windows")
+			r.logger.Warn("Port cleanup skipped on Windows")
 		}
 	}
 
 	for i := 0; i < maxRestartAttempts; i++ {
-		// Принудительно останавливаем контейнер перед запуском
 		cmd := r.commander.Command(r.dockerPath, "stop", containerName)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			r.logger.Warnf("Force stop failed: %s", string(output))
 		}
 
-		// Запускаем контейнер
 		cmd = r.commander.Command(r.dockerPath, "start", containerName)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			r.logger.Errorf("Start failed: %s", string(output))
@@ -587,30 +617,29 @@ func (r *Renderer) restartContainer() error {
 			continue
 		}
 
-		// Увеличиваем время ожидания готовности Chrome
-		r.logger.Info("Waiting for Chrome to initialize...")
-		time.Sleep(10 * time.Second)
+		time.Sleep(30 * time.Second)
 
-		// Проверяем статус контейнера
 		status := r.getContainerStatus()
 		if status != "running" {
 			r.logger.Warnf("Container status after start: %s, retrying...", status)
+			cmd := r.commander.Command(r.dockerPath, "logs", containerName)
+			if logs, err := cmd.CombinedOutput(); err == nil {
+				r.logger.Warnf("Container logs:\n%s", string(logs))
+			}
+			time.Sleep(5 * time.Second)
 			continue
 		}
 
-		// Получаем новый debug URL
 		wsURL, err := r.getDebugURLWithRetry()
 		if err != nil {
 			r.logger.Warnf("Failed to get debug URL: %v", err)
 			continue
 		}
 
-		// Устанавливаем новый аллокатор
 		r.setRemoteAllocator(wsURL)
-		r.setContainerReady(true)
 
-		// Проверяем работоспособность
 		if err := r.verifyChromeConnection(); err == nil {
+			r.setContainerReady(true)
 			r.logger.Info("Container restarted and verified successfully")
 			return nil
 		} else {
@@ -621,29 +650,75 @@ func (r *Renderer) restartContainer() error {
 	return ErrContainerRestart
 }
 
-// Новая функция для проверки соединения
+/******************************************
+ * Вспомогательные методы
+ ******************************************/
+
+func (r *Renderer) captureConsoleEvents(ctx context.Context, result *RenderResult) {
+	chromedp.ListenTarget(ctx, func(ev interface{}) {
+		switch ev := ev.(type) {
+		case *runtime.EventConsoleAPICalled:
+			entry := ConsoleEntry{Type: ev.Type.String()}
+			for _, arg := range ev.Args {
+				msg := arg.Description
+				if msg == "" && arg.Value != nil {
+					msg = fmt.Sprintf("%v", arg.Value)
+				}
+				entry.Messages = append(entry.Messages, msg)
+			}
+			result.Console = append(result.Console, entry)
+		case *runtime.EventExceptionThrown:
+			result.Exception = ev.ExceptionDetails.Error()
+		}
+	})
+}
+
+func (r *Renderer) shouldRestart(err error) bool {
+	return strings.Contains(err.Error(), "could not dial \"ws:") ||
+		strings.Contains(err.Error(), "exec: \"google-chrome\":") ||
+		errors.Is(err, ErrInvalidContext)
+}
+
 func (r *Renderer) verifyChromeConnection() error {
-	testCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if r.allocatorCtx == nil {
+		return errors.New("allocator context is nil")
+	}
+
+	ctx, cancel := context.WithTimeout(r.allocatorCtx, 10*time.Second)
 	defer cancel()
 
+	browserCtx, cancelBrowser := chromedp.NewContext(ctx)
+	defer cancelBrowser()
+
 	var res string
-	err := chromedp.Run(testCtx,
+	err := chromedp.Run(browserCtx,
 		chromedp.Navigate("about:blank"),
 		chromedp.OuterHTML("html", &res),
 	)
 
 	if err != nil || res == "" {
-		return fmt.Errorf("chrome connection test failed: %w", err)
+		return errors.New("chrome connection test failed")
 	}
 	return nil
 }
 
-// getDebugURLWithRetry получает URL для отладки с повторными попытками
+func (r *Renderer) setRemoteAllocator(wsURL string) {
+	r.allocatorMutex.Lock()
+	defer r.allocatorMutex.Unlock()
+
+	if r.cancelAllocator != nil {
+		r.cancelAllocator()
+	}
+
+	allocatorCtx, cancelAlloc := r.allocatorCreator.CreateRemoteAllocator(context.Background(), wsURL)
+	r.allocatorCtx = allocatorCtx
+	r.cancelAllocator = cancelAlloc
+	r.wsURL = wsURL
+}
+
 func (r *Renderer) getDebugURLWithRetry() (string, error) {
 	attempt := 1
 	delay := r.debugURLRetryDelay
-	maxDelay := 15 * time.Second
-
 	for attempt <= r.debugURLMaxAttempts {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		wsURL, err := r.getDebugURL(ctx)
@@ -653,29 +728,18 @@ func (r *Renderer) getDebugURLWithRetry() (string, error) {
 			return wsURL, nil
 		}
 
-		r.logger.Debugf("Debug URL attempt failed (%d/%d): %v", attempt, r.debugURLMaxAttempts, err)
-
 		if attempt < r.debugURLMaxAttempts {
-			if delay > 0 {
-				if r.sleeper != nil {
-					r.sleeper(delay)
-				} else {
-					time.Sleep(delay)
-				}
-			}
-
+			time.Sleep(delay)
 			delay *= 2
-			if delay > maxDelay {
-				delay = maxDelay
+			if delay > 15*time.Second {
+				delay = 15 * time.Second
 			}
 		}
 		attempt++
 	}
-
-	return "", fmt.Errorf("failed to get debug URL after %d attempts", r.debugURLMaxAttempts)
+	return "", fmt.Errorf("failed after %d attempts", r.debugURLMaxAttempts)
 }
 
-// getDebugURL получает URL для отладки
 func (r *Renderer) getDebugURL(ctx context.Context) (string, error) {
 	if r.portChecker != nil && !r.portChecker.IsPortAvailable(9222) {
 		return "", ErrPortNotAvailable
@@ -701,9 +765,7 @@ func (r *Renderer) getDebugURL(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	var data struct {
-		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
-	}
+	var data struct{ WebSocketDebuggerURL string }
 	if err := json.Unmarshal(body, &data); err != nil {
 		return "", err
 	}
@@ -714,86 +776,7 @@ func (r *Renderer) getDebugURL(ctx context.Context) (string, error) {
 	return data.WebSocketDebuggerURL, nil
 }
 
-// setRestarting устанавливает флаг перезапуска
-func (r *Renderer) setRestarting(state bool) {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-	r.restartingFlag = state
-}
-
-// isRestarting проверяет, выполняется ли перезапуск
-func (r *Renderer) isRestarting() bool {
-	r.mutex.RLock()
-	defer r.mutex.RUnlock()
-	return r.restartingFlag
-}
-
-// setupContainer настраивает контейнер
-func (r *Renderer) setupContainer() error {
-	if r.isStarted {
-		return nil
-	}
-
-	path, err := r.commander.LookPath("docker")
-	if err != nil {
-		r.logger.Error("Docker not found")
-		return err
-	}
-	r.dockerPath = path
-
-	status := r.getContainerStatus()
-	r.logger.Infof("Initial container status: %s", status)
-
-	// Если контейнер уже запущен, сразу возвращаем успех
-	if status == "running" {
-		r.isStarted = true
-		r.logger.Info("Container setup completed")
-		return nil
-	}
-
-	if r.sleeper != nil {
-		r.sleeper(r.containerStartDelay)
-	} else {
-		time.Sleep(r.containerStartDelay)
-	}
-	status = r.getContainerStatus()
-	if status != "running" {
-		return fmt.Errorf("container did not start, status: %s", status)
-	}
-
-	r.isStarted = true
-	r.logger.Info("Container setup completed")
-	return nil
-}
-
-// getContainerStatus возвращает статус контейнера
-func (r *Renderer) getContainerStatus() string {
-	cmd := r.commander.Command("sh", "-c", dockerHealthCheckCmd)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return "unknown"
-	}
-	return strings.Trim(string(output), "' \n")
-}
-
-// RealPortChecker реализация PortChecker для реального окружения
-type RealPortChecker struct{}
-
-func (c *RealPortChecker) IsPortAvailable(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), portCheckTimeout)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
-
-// Cancel отменяет операции рендерера
-func (r *Renderer) Cancel() {
-	r.allocatorMutex.Lock()
-	defer r.allocatorMutex.Unlock()
-
-	if r.cancelAllocator != nil {
-		r.cancelAllocator()
-	}
+// Валидация URL
+func isValidURL(url string) bool {
+	return strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
 }
