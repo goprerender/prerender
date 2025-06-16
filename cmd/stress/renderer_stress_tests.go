@@ -19,12 +19,11 @@ import (
 	"github.com/goprerender/prerender/pkg/renderer"
 )
 
-const containerName = "headless-shell"
-
 var (
 	concurrentRequests = 10
 	longTermRequests   = 30
 	renderTimeout      = 120 * time.Second
+	containerName      = "headless-shell-test"
 )
 
 func init() {
@@ -44,6 +43,10 @@ func init() {
 		if d, err := time.ParseDuration(env); err == nil {
 			renderTimeout = d
 		}
+	}
+
+	if env, ok := os.LookupEnv("CONTAINER_NAME"); ok {
+		containerName = env
 	}
 }
 
@@ -95,24 +98,27 @@ func waitForContainerPort(port int, timeout time.Duration) error {
 	}
 }
 
-func ensureContainerRunning() error {
+func ensureContainerRunning(port int) error {
 	cmd := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", containerName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Println("Container not found, creating...")
-		cmd = exec.Command("docker", "run", "-d", "-p", "9222:9222", "--name", containerName,
-			"--memory=2g", "--cpus=2", "--shm-size=1g", "chromedp/headless-shell")
+		cmd = exec.Command("docker", "run", "-d",
+			"-p", fmt.Sprintf("%d:9222", port), // Исправлено здесь
+			"--name", containerName,
+			"--memory=2g", "--cpus=2", "--shm-size=1g",
+			"chromedp/headless-shell")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to create container: %v\n%s", err, output)
 		}
 		log.Println("Container created successfully")
-		return waitForContainerPort(9222, 30*time.Second)
+		return waitForContainerPort(port, 30*time.Second)
 	}
 
 	status := strings.TrimSpace(string(output))
 	if status == "running" {
 		log.Println("Container is already running")
-		return waitForContainerPort(9222, 5*time.Second)
+		return waitForContainerPort(port, 5*time.Second)
 	}
 
 	log.Printf("Container status: %s, attempting to start...", status)
@@ -122,29 +128,33 @@ func ensureContainerRunning() error {
 	}
 
 	log.Println("Container started successfully")
-	return waitForContainerPort(9222, 30*time.Second)
+	return waitForContainerPort(port, 30*time.Second)
 }
 
 func main() {
 	logger := &RealLogger{}
 
-	log.Println("Preparing container...")
-	if err := ensureContainerRunning(); err != nil {
+	// Генерируем уникальный порт для теста
+	rand.Seed(time.Now().UnixNano())
+	port := 9222 + rand.Intn(1000)
+
+	log.Printf("Preparing container %s on port %d...", containerName, port)
+	if err := ensureContainerRunning(port); err != nil {
 		log.Fatalf("Container error: %v", err)
 	}
 
-	r := renderer.NewRenderer(logger, &renderer.RealCommander{}, &renderer.RealHTTPClient{})
-
+	r := renderer.NewDefaultRenderer()
+	r.SetContainerName(containerName)
+	r.SetDebugPort(port) // Устанавливаем уникальный порт
 	r.SetPortChecker(&renderer.RealPortChecker{})
-
 	r.SetConsoleCapture(true)
 	r.SetContainerReadyTimeout(120 * time.Second)
 	r.SetDebugURLMaxAttempts(60)
 	r.SetConcurrencyLimit(5) // Ограничение параллельных запросов
 
 	fmt.Println("Starting renderer stress test...")
-	fmt.Printf("Configuration:\n  Concurrent requests: %d\n  Long-term requests: %d\n  Timeout: %v\n",
-		concurrentRequests, longTermRequests, renderTimeout)
+	fmt.Printf("Configuration:\n  Container: %s\n  Port: %d\n  Concurrent requests: %d\n  Long-term requests: %d\n  Timeout: %v\n",
+		containerName, port, concurrentRequests, longTermRequests, renderTimeout)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -319,7 +329,7 @@ func testContainerRestart(ctx context.Context, r *renderer.Renderer, logger *Rea
 
 	// Получаем время последнего старта контейнера
 	log.Println("Getting container start time before restart...")
-	startTimeBefore := getContainerStartTime()
+	startTimeBefore := getContainerStartTime(r)
 	log.Printf("Container start time before restart: %s", startTimeBefore)
 
 	// Специальный URL для тестирования перезапуска
@@ -341,7 +351,7 @@ func testContainerRestart(ctx context.Context, r *renderer.Renderer, logger *Rea
 	log.Println("Waiting for container to restart...")
 	startWait := time.Now()
 	for {
-		currentStartTime := getContainerStartTime()
+		currentStartTime := getContainerStartTime(r)
 		if currentStartTime != startTimeBefore {
 			log.Printf("Container restarted! New start time: %s", currentStartTime)
 			break
@@ -366,8 +376,8 @@ func testContainerRestart(ctx context.Context, r *renderer.Renderer, logger *Rea
 	log.Println("Container restart test completed successfully!")
 }
 
-func getContainerStartTime() string {
-	cmd := exec.Command("docker", "inspect", "-f", "{{.State.StartedAt}}", containerName)
+func getContainerStartTime(r *renderer.Renderer) string {
+	cmd := exec.Command("docker", "inspect", "-f", "{{.State.StartedAt}}", r.GetContainerName())
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "unknown"
@@ -376,16 +386,15 @@ func getContainerStartTime() string {
 }
 
 func monitorRenderer(ctx context.Context, r *renderer.Renderer) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
 			if !r.IsContainerReady() {
-				log.Println("Renderer is not ready, initiating recovery...")
-				r.Cancel()
-				r.Setup()
+				log.Println("Renderer is not ready, initiating forced recovery...")
+				r.ForceRecovery()
 
 				// Ожидаем восстановления
 				start := time.Now()

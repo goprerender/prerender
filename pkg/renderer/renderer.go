@@ -24,15 +24,15 @@ import (
 
 // Константы сервиса
 const (
-	containerName         = "headless-shell"
-	debugURL              = "http://localhost:9222/json/version"
-	renderTimeout         = 120 * time.Second
-	maxRestartAttempts    = 5
-	dockerHealthCheckCmd  = "docker inspect -f '{{.State.Status}}' " + containerName
-	maxConcurrentRenders  = 10
-	containerReadyTimeout = 180 * time.Second
-	restartCooldown       = 60 * time.Second
-	portCheckTimeout      = 10 * time.Second
+	defaultContainerName    = "headless-shell"
+	defaultDebugPort        = 9222
+	renderTimeout           = 120 * time.Second
+	maxRestartAttempts      = 5
+	maxConcurrentRenders    = 10
+	containerReadyTimeout   = 180 * time.Second
+	restartCooldown         = 60 * time.Second
+	portCheckTimeout        = 10 * time.Second
+	activeRequestsWaitLimit = 5 * time.Second
 )
 
 // Ошибки сервиса
@@ -87,6 +87,13 @@ type PageRenderer interface {
 	RenderPage(url string, result *RenderResult) (string, error)
 }
 
+// ContainerManager интерфейс для управления контейнерами
+type ContainerManager interface {
+	EnsureRunning() error
+	GetStatus() string
+	Restart() error
+}
+
 // RenderResult содержит результаты рендеринга
 type RenderResult struct {
 	HTML       string         // HTML-содержимое страницы
@@ -133,6 +140,7 @@ type Renderer struct {
 	portChecker      PortChecker      // Проверка портов
 	pageRenderer     PageRenderer     // Рендерер страниц
 	allocatorCreator AllocatorCreator // Создатель контекста Chrome
+	containerManager ContainerManager // Менеджер контейнеров
 
 	// Конфигурация
 	dockerPath            string        // Путь к Docker
@@ -142,6 +150,8 @@ type Renderer struct {
 	containerReadyTimeout time.Duration // Таймаут готовности контейнера
 	debugURLRetryDelay    time.Duration // Задержка между попытками
 	debugURLMaxAttempts   int           // Макс. попыток получения debug URL
+	containerName         string        // Название контейнера
+	debugPort             int           // Порт для отладки Chrome
 }
 
 // DefaultLogger стандартная реализация логгера
@@ -209,6 +219,59 @@ func (c *RealPortChecker) IsPortAvailable(port int) bool {
 	return true
 }
 
+// DockerContainerManager реализация управления контейнерами Docker
+type DockerContainerManager struct {
+	commander     Commander
+	containerName string
+	debugPort     int
+	logger        Logger
+}
+
+func (d *DockerContainerManager) dockerHealthCheckCmd() string {
+	return fmt.Sprintf("docker inspect -f '{{.State.Status}}' %s", d.containerName)
+}
+
+func (d *DockerContainerManager) GetStatus() string {
+	cmd := d.commander.Command("sh", "-c", d.dockerHealthCheckCmd())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.Trim(string(output), "' \n")
+}
+
+func (d *DockerContainerManager) EnsureRunning() error {
+	status := d.GetStatus()
+	if status == "running" {
+		d.logger.Infof("Container %s is already running", d.containerName)
+		return nil
+	}
+
+	if status == "exited" || status == "created" {
+		d.logger.Infof("Starting container %s...", d.containerName)
+		cmd := d.commander.Command("docker", "start", d.containerName)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to start container: %v\n%s", err, output)
+		}
+		d.logger.Infof("Container %s started successfully", d.containerName)
+		return nil
+	}
+
+	d.logger.Warnf("Container %s has unexpected status: %s", d.containerName, status)
+	return fmt.Errorf("container status: %s", status)
+}
+
+func (d *DockerContainerManager) Restart() error {
+	d.logger.Infof("Restarting container %s...", d.containerName)
+	cmd := d.commander.Command("docker", "restart", d.containerName)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to restart container: %v\n%s", err, output)
+	}
+	d.logger.Infof("Container %s restarted successfully", d.containerName)
+	return nil
+}
+
 // NewRenderer создает новый экземпляр рендерера
 func NewRenderer(logger Logger, commander Commander, httpClient HTTPClient) *Renderer {
 	r := &Renderer{
@@ -230,10 +293,27 @@ func NewRenderer(logger Logger, commander Commander, httpClient HTTPClient) *Ren
 		debugURLRetryDelay:    1 * time.Second,
 		debugURLMaxAttempts:   20,
 		allocatorCreator:      &RealAllocatorCreator{},
+		portChecker:           &RealPortChecker{},
+		containerName:         defaultContainerName,
+		debugPort:             defaultDebugPort,
 	}
 	r.resetReadyCh()
 	r.pageRenderer = r
+	r.containerManager = &DockerContainerManager{
+		commander:     commander,
+		containerName: defaultContainerName,
+		debugPort:     defaultDebugPort,
+		logger:        logger,
+	}
 	return r
+}
+
+// NewDefaultRenderer создает рендерер с зависимостями по умолчанию
+func NewDefaultRenderer() *Renderer {
+	logger := &DefaultLogger{}
+	commander := &RealCommander{}
+	httpClient := &RealHTTPClient{}
+	return NewRenderer(logger, commander, httpClient)
 }
 
 /******************************************
@@ -275,6 +355,41 @@ func (r *Renderer) SetDebugURLMaxAttempts(attempts int) {
 	r.debugURLMaxAttempts = attempts
 }
 
+// SetContainerName устанавливает название контейнера
+func (r *Renderer) SetContainerName(name string) {
+	r.containerName = name
+	if manager, ok := r.containerManager.(*DockerContainerManager); ok {
+		manager.containerName = name
+	}
+}
+
+// SetDebugPort устанавливает порт для отладки Chrome
+func (r *Renderer) SetDebugPort(port int) {
+	r.debugPort = port
+	if manager, ok := r.containerManager.(*DockerContainerManager); ok {
+		manager.debugPort = port
+	}
+}
+
+// GetContainerName возвращает название контейнера
+func (r *Renderer) GetContainerName() string {
+	return r.containerName
+}
+
+// ForceRecovery принудительно восстанавливает работу рендерера
+func (r *Renderer) ForceRecovery() {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	r.logger.Info("Initiating forced recovery")
+	r.Cancel()
+	r.setContainerReady(false)
+	r.resetReadyCh()
+
+	// Повторная инициализация
+	r.Setup()
+}
+
 /******************************************
  * Основные публичные методы
  ******************************************/
@@ -290,8 +405,10 @@ func (r *Renderer) Setup() {
 	}
 
 	r.logger.Info("Initializing renderer...")
+	r.logger.Infof("Using container: %s on port %d", r.containerName, r.debugPort)
+
 	r.logger.Info("Setting up container...")
-	if err := r.setupContainer(); err != nil {
+	if err := r.containerManager.EnsureRunning(); err != nil {
 		r.logger.Errorf("Container setup error: %v", err)
 	}
 
@@ -524,35 +641,6 @@ func (r *Renderer) waitForContainerReady() error {
  * Методы управления контейнером
  ******************************************/
 
-func (r *Renderer) setupContainer() error {
-	path, err := r.commander.LookPath("docker")
-	if err != nil {
-		return err
-	}
-	r.dockerPath = path
-
-	status := r.getContainerStatus()
-	if status == "running" {
-		return nil
-	}
-
-	time.Sleep(5 * time.Second)
-	status = r.getContainerStatus()
-	if status != "running" {
-		return fmt.Errorf("container status: %s", status)
-	}
-	return nil
-}
-
-func (r *Renderer) getContainerStatus() string {
-	cmd := r.commander.Command("sh", "-c", dockerHealthCheckCmd)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return "unknown"
-	}
-	return strings.Trim(string(output), "' \n")
-}
-
 // restartContainer перезапускает контейнер Chrome
 func (r *Renderer) restartContainer() error {
 	r.restartMutex.Lock()
@@ -582,7 +670,7 @@ func (r *Renderer) restartContainer() error {
 	r.logger.Info("Waiting for active requests to complete before restart...")
 	start := time.Now()
 	for atomic.LoadInt32(&r.activeRequests) > 0 {
-		if time.Since(start) > 30*time.Second {
+		if time.Since(start) > activeRequestsWaitLimit {
 			r.logger.Warn("Timeout waiting for active requests, proceeding with restart")
 			break
 		}
@@ -591,11 +679,17 @@ func (r *Renderer) restartContainer() error {
 
 	r.logger.Info("Restarting container...")
 
+	// Используем менеджер контейнеров для перезапуска
+	if err := r.containerManager.Restart(); err != nil {
+		r.logger.Errorf("Container restart failed: %v", err)
+		return err
+	}
+
 	// Очистка порта (только для Linux)
-	if r.portChecker != nil && !r.portChecker.IsPortAvailable(9222) {
+	if r.portChecker != nil && !r.portChecker.IsPortAvailable(r.debugPort) {
 		if rt.GOOS != "windows" {
-			r.logger.Warn("Debug port 9222 is busy, killing processes...")
-			cmd := r.commander.Command("fuser", "-k", "9222/tcp")
+			r.logger.Warnf("Debug port %d is busy, killing processes...", r.debugPort)
+			cmd := r.commander.Command("fuser", "-k", fmt.Sprintf("%d/tcp", r.debugPort))
 			if err := cmd.Run(); err != nil {
 				r.logger.Errorf("Failed to kill processes: %v", err)
 			}
@@ -604,50 +698,22 @@ func (r *Renderer) restartContainer() error {
 		}
 	}
 
-	for i := 0; i < maxRestartAttempts; i++ {
-		cmd := r.commander.Command(r.dockerPath, "stop", containerName)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			r.logger.Warnf("Force stop failed: %s", string(output))
-		}
-
-		cmd = r.commander.Command(r.dockerPath, "start", containerName)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			r.logger.Errorf("Start failed: %s", string(output))
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		time.Sleep(30 * time.Second)
-
-		status := r.getContainerStatus()
-		if status != "running" {
-			r.logger.Warnf("Container status after start: %s, retrying...", status)
-			cmd := r.commander.Command(r.dockerPath, "logs", containerName)
-			if logs, err := cmd.CombinedOutput(); err == nil {
-				r.logger.Warnf("Container logs:\n%s", string(logs))
-			}
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		wsURL, err := r.getDebugURLWithRetry()
-		if err != nil {
-			r.logger.Warnf("Failed to get debug URL: %v", err)
-			continue
-		}
-
-		r.setRemoteAllocator(wsURL)
-
-		if err := r.verifyChromeConnection(); err == nil {
-			r.setContainerReady(true)
-			r.logger.Info("Container restarted and verified successfully")
-			return nil
-		} else {
-			r.logger.Warnf("Chrome verification failed: %v", err)
-		}
+	wsURL, err := r.getDebugURLWithRetry()
+	if err != nil {
+		r.logger.Warnf("Failed to get debug URL: %v", err)
+		return err
 	}
 
-	return ErrContainerRestart
+	r.setRemoteAllocator(wsURL)
+
+	if err := r.verifyChromeConnection(); err == nil {
+		r.setContainerReady(true)
+		r.logger.Info("Container restarted and verified successfully")
+		return nil
+	} else {
+		r.logger.Warnf("Chrome verification failed: %v", err)
+		return ErrContainerRestart
+	}
 }
 
 /******************************************
@@ -741,10 +807,11 @@ func (r *Renderer) getDebugURLWithRetry() (string, error) {
 }
 
 func (r *Renderer) getDebugURL(ctx context.Context) (string, error) {
-	if r.portChecker != nil && !r.portChecker.IsPortAvailable(9222) {
+	if r.portChecker != nil && !r.portChecker.IsPortAvailable(r.debugPort) {
 		return "", ErrPortNotAvailable
 	}
 
+	debugURL := fmt.Sprintf("http://localhost:%d/json/version", r.debugPort)
 	req, err := http.NewRequestWithContext(ctx, "GET", debugURL, nil)
 	if err != nil {
 		return "", err
