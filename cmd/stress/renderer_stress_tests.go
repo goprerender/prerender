@@ -23,7 +23,7 @@ var (
 	concurrentRequests = 10
 	longTermRequests   = 30
 	renderTimeout      = 120 * time.Second
-	containerName      = "headless-shell-test"
+	containerName      = "headless-shell"
 )
 
 func init() {
@@ -98,41 +98,101 @@ func waitForContainerPort(port int, timeout time.Duration) error {
 	}
 }
 
-func ensureContainerRunning(port int) error {
-	cmd := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", containerName)
+func createContainer(port int) error {
+	log.Println("Creating new container...")
+	cmd := exec.Command("docker", "run", "-d",
+		"-p", fmt.Sprintf("%d:9222", port),
+		"--name", containerName,
+		"--memory=2g", "--cpus=2", "--shm-size=1g",
+		"chromedp/headless-shell")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to create container: %v\n%s", err, output)
+	}
+	log.Println("Container created successfully")
+	return waitForContainerPort(port, 30*time.Second)
+}
+
+func cleanupContainer() {
+	if containerName == "" {
+		return
+	}
+
+	// Check if container exists
+	cmd := exec.Command("docker", "inspect", "--format='{{.State.Status}}'", containerName)
+	if _, err := cmd.CombinedOutput(); err != nil {
+		log.Println("Container does not exist, nothing to clean up")
+		return
+	}
+
+	// Stop container
+	log.Println("Stopping container...")
+	cmd = exec.Command("docker", "stop", containerName)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("Failed to stop container: %v\n%s", err, output)
+	} else {
+		log.Println("Container stopped")
+	}
+
+	// Remove container
+	log.Println("Removing container...")
+	cmd = exec.Command("docker", "rm", containerName)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("Failed to remove container: %v\n%s", err, output)
+	} else {
+		log.Println("Container removed")
+	}
+}
+
+func getContainerPort() (int, error) {
+	cmd := exec.Command("docker", "inspect",
+		"--format='{{range $p, $conf := .NetworkSettings.Ports}}{{(index $conf 0).HostPort}}{{end}}'",
+		containerName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Println("Container not found, creating...")
-		cmd = exec.Command("docker", "run", "-d",
-			"-p", fmt.Sprintf("%d:9222", port), // Исправлено здесь
-			"--name", containerName,
-			"--memory=2g", "--cpus=2", "--shm-size=1g",
-			"chromedp/headless-shell")
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to create container: %v\n%s", err, output)
-		}
-		log.Println("Container created successfully")
-		return waitForContainerPort(port, 30*time.Second)
+		return 0, err
 	}
 
-	status := strings.TrimSpace(string(output))
-	if status == "running" {
-		log.Println("Container is already running")
-		return waitForContainerPort(port, 5*time.Second)
+	portStr := strings.TrimSpace(string(output))
+	portStr = strings.Trim(portStr, "'") // Удаляем возможные кавычки
+	if portStr == "" {
+		return 0, errors.New("port not found")
 	}
 
-	log.Printf("Container status: %s, attempting to start...", status)
-	cmd = exec.Command("docker", "start", containerName)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to start container: %v\n%s", err, output)
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse port '%s': %v", portStr, err)
 	}
 
-	log.Println("Container started successfully")
-	return waitForContainerPort(port, 30*time.Second)
+	return port, nil
+}
+
+func ensureContainerRunning(port int) error {
+	// Cleanup any existing container first
+	cleanupContainer()
+
+	// Create new container with specified port
+	if err := createContainer(port); err != nil {
+		return err
+	}
+
+	// Verify container port
+	actualPort, err := getContainerPort()
+	if err != nil {
+		return fmt.Errorf("failed to get container port: %v", err)
+	}
+
+	if actualPort != port {
+		log.Printf("Warning: Requested port %d, but container is using port %d", port, actualPort)
+	}
+
+	return nil
 }
 
 func main() {
 	logger := &RealLogger{}
+
+	// Cleanup container on exit
+	defer cleanupContainer()
 
 	// Генерируем уникальный порт для теста
 	rand.Seed(time.Now().UnixNano())
@@ -143,9 +203,18 @@ func main() {
 		log.Fatalf("Container error: %v", err)
 	}
 
+	// Получаем реальный порт контейнера
+	actualPort, err := getContainerPort()
+	if err != nil {
+		log.Printf("Warning: failed to get container port: %v", err)
+		actualPort = port
+	} else {
+		log.Printf("Container is using port %d", actualPort)
+	}
+
 	r := renderer.NewDefaultRenderer()
 	r.SetContainerName(containerName)
-	r.SetDebugPort(port) // Устанавливаем уникальный порт
+	r.SetDebugPort(actualPort) // Используем реальный порт
 	r.SetPortChecker(&renderer.RealPortChecker{})
 	r.SetConsoleCapture(true)
 	r.SetContainerReadyTimeout(120 * time.Second)
@@ -154,7 +223,7 @@ func main() {
 
 	fmt.Println("Starting renderer stress test...")
 	fmt.Printf("Configuration:\n  Container: %s\n  Port: %d\n  Concurrent requests: %d\n  Long-term requests: %d\n  Timeout: %v\n",
-		containerName, port, concurrentRequests, longTermRequests, renderTimeout)
+		containerName, actualPort, concurrentRequests, longTermRequests, renderTimeout)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
