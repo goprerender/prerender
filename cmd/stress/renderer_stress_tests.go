@@ -144,16 +144,18 @@ func cleanupContainer() {
 }
 
 func getContainerPort() (int, error) {
+	// Используем упрощенный формат для получения порта
 	cmd := exec.Command("docker", "inspect",
-		"--format='{{range $p, $conf := .NetworkSettings.Ports}}{{(index $conf 0).HostPort}}{{end}}'",
+		"--format", "{{(index (index .NetworkSettings.Ports \"9222/tcp\") 0).HostPort}}",
 		containerName)
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return 0, err
+		// Добавляем вывод ошибки для диагностики
+		return 0, fmt.Errorf("docker inspect error: %v\nOutput: %s", err, string(output))
 	}
 
 	portStr := strings.TrimSpace(string(output))
-	portStr = strings.Trim(portStr, "'") // Удаляем возможные кавычки
 	if portStr == "" {
 		return 0, errors.New("port not found")
 	}
@@ -215,7 +217,7 @@ func main() {
 	r := renderer.NewDefaultRenderer()
 	r.SetContainerName(containerName)
 	r.SetDebugPort(actualPort) // Используем реальный порт
-	r.SetPortChecker(&renderer.RealPortChecker{})
+	r.SetPortChecker(renderer.NewRealPortChecker())
 	r.SetConsoleCapture(true)
 	r.SetContainerReadyTimeout(120 * time.Second)
 	r.SetDebugURLMaxAttempts(60)

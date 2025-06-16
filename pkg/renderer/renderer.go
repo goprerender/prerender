@@ -25,7 +25,7 @@ import (
 // Константы сервиса
 const (
 	defaultContainerName    = "headless-shell"
-	defaultDebugPort        = 9222
+	defaultDebugPort        = 9826
 	renderTimeout           = 120 * time.Second
 	maxRestartAttempts      = 5
 	maxConcurrentRenders    = 10
@@ -208,7 +208,13 @@ func (a *RealAllocatorCreator) CreateRemoteAllocator(ctx context.Context, url st
 }
 
 // RealPortChecker проверка портов через net.Dial
-type RealPortChecker struct{}
+type RealPortChecker struct {
+	IsRunning bool
+}
+
+func NewRealPortChecker() *RealPortChecker {
+	return &RealPortChecker{IsRunning: true}
+}
 
 func (c *RealPortChecker) IsPortAvailable(port int) bool {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), 1*time.Second)
