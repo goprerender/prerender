@@ -22,7 +22,7 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-// Константы сервиса
+// Service constants
 const (
 	defaultContainerName    = "headless-shell"
 	defaultDebugPort        = 9826
@@ -35,7 +35,7 @@ const (
 	activeRequestsWaitLimit = 10 * time.Second
 )
 
-// Ошибки сервиса
+// Service errors
 var (
 	ErrNotResponding      = errors.New("chrome not responding")
 	ErrNameNotResolved    = errors.New("domain name not resolved")
@@ -50,7 +50,7 @@ var (
 	ErrDOMNodeNotFound    = errors.New("DOM node not found")
 )
 
-// Logger интерфейс для унифицированного логирования
+// Logger defines the logging interface for the renderer
 type Logger interface {
 	Info(args ...interface{})
 	Infof(format string, args ...interface{})
@@ -62,101 +62,95 @@ type Logger interface {
 	Debugf(format string, args ...interface{})
 }
 
-// Commander интерфейс для работы с системными командами
+// Commander defines the command execution interface
 type Commander interface {
 	LookPath(file string) (string, error)
 	Command(name string, arg ...string) *exec.Cmd
 }
 
-// HTTPClient интерфейс для HTTP-запросов
+// HTTPClient defines the HTTP client interface
 type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-// AllocatorCreator интерфейс для создания контекста Chrome
+// AllocatorCreator defines the context creation interface for Chrome
 type AllocatorCreator interface {
 	CreateRemoteAllocator(ctx context.Context, url string) (context.Context, context.CancelFunc)
 }
 
-// PortChecker интерфейс для проверки доступности портов
+// PortChecker defines the port availability checking interface
 type PortChecker interface {
 	IsPortAvailable(port int) bool
 }
 
-// PageRenderer интерфейс для рендеринга страниц
+// PageRenderer defines the page rendering interface
 type PageRenderer interface {
 	RenderPage(url string, result *RenderResult) (string, error)
 }
 
-// ContainerManager интерфейс для управления контейнерами
+// ContainerManager defines the container management interface
 type ContainerManager interface {
 	EnsureRunning() error
 	GetStatus() string
 	Restart() error
 }
 
-// RenderResult содержит результаты рендеринга
+// RenderResult contains the results of a page render
 type RenderResult struct {
-	HTML       string         // HTML-содержимое страницы
-	Console    []ConsoleEntry // Записи консоли браузера
-	Exception  string         // Исключения JavaScript
-	TotalTime  time.Duration  // Общее время выполнения
-	RenderTime time.Duration  // Время непосредственно рендеринга
+	HTML       string         // Rendered HTML content
+	Console    []ConsoleEntry // Browser console entries
+	Exception  string         // JavaScript exceptions
+	TotalTime  time.Duration  // Total execution time
+	RenderTime time.Duration  // Rendering time
 }
 
-// ConsoleEntry представляет запись в консоли браузера
+// ConsoleEntry represents a browser console message
 type ConsoleEntry struct {
-	Type     string   // Тип записи (log, error, warning)
-	Messages []string // Сообщения
+	Type     string   // Entry type (log, error, warning)
+	Messages []string // Message content
 }
 
-// Renderer основной сервис рендеринга
+// Renderer is the main rendering service
 type Renderer struct {
-	// Состояние рендерера
-	mutex          sync.Mutex // Защита общего состояния
-	isStarted      bool       // Флаг инициализации
-	restartingFlag bool       // Флаг выполнения перезапуска
-	containerReady bool       // Флаг готовности контейнера
+	mutex          sync.Mutex
+	isStarted      bool
+	restartingFlag bool
+	containerReady bool
 
-	// Контекст Chrome
-	allocatorCtx    context.Context    // Контекст для Chrome DevTools
-	cancelAllocator context.CancelFunc // Функция отмены контекста
-	wsURL           string             // WebSocket URL для Chrome
-	allocatorMutex  sync.RWMutex       // Мьютекс для аллокатора
+	allocatorCtx    context.Context
+	cancelAllocator context.CancelFunc
+	wsURL           string
+	allocatorMutex  sync.RWMutex
 
-	// Управление параллелизмом
-	semaphore      chan struct{} // Семафор для ограничения параллелизма
-	restartQueue   chan struct{} // Очередь перезапусков
-	activeRequests int32         // Счетчик активных запросов
-	restartMutex   sync.Mutex    // Мьютекс для синхронизации перезапуска
+	semaphore      chan struct{}
+	restartQueue   chan struct{}
+	activeRequests int32
+	restartMutex   sync.Mutex
 
-	// Каналы и блокировки
-	readyCh    chan struct{} // Канал готовности контейнера
-	readyMutex sync.Mutex    // Мьютекс для readyCh
+	readyCh    chan struct{}
+	readyMutex sync.Mutex
 
-	// Внешние зависимости
-	logger           Logger           // Логгер
-	commander        Commander        // Исполнитель команд
-	httpClient       HTTPClient       // HTTP-клиент
-	portChecker      PortChecker      // Проверка портов
-	pageRenderer     PageRenderer     // Рендерер страниц
-	allocatorCreator AllocatorCreator // Создатель контекста Chrome
-	containerManager ContainerManager // Менеджер контейнеров
+	logger           Logger
+	commander        Commander
+	httpClient       HTTPClient
+	portChecker      PortChecker
+	pageRenderer     PageRenderer
+	allocatorCreator AllocatorCreator
+	containerManager ContainerManager
 
-	// Конфигурация
-	dockerPath            string        // Путь к Docker
-	lastRestart           time.Time     // Время последнего перезапуска
-	captureConsoleLog     bool          // Флаг захвата логов консоли
-	blockedURLs           []string      // Блокируемые URL (трекинг, реклама)
-	containerReadyTimeout time.Duration // Таймаут готовности контейнера
-	debugURLRetryDelay    time.Duration // Задержка между попытками
-	debugURLMaxAttempts   int           // Макс. попыток получения debug URL
-	containerName         string        // Название контейнера
-	debugPort             int           // Порт для отладки Chrome
-	renderTimeout         time.Duration // Таймаут для рендеринга страницы
+	dockerPath            string
+	lastRestart           time.Time
+	captureConsoleLog     bool
+	blockedURLs           []string
+	containerReadyTimeout time.Duration
+	debugURLRetryDelay    time.Duration
+	debugURLMaxAttempts   int
+	containerName         string
+	debugPort             int
+	renderTimeout         time.Duration
 }
 
-// DefaultLogger стандартная реализация логгера
+// DefaultLogger provides a standard logger implementation
 type DefaultLogger struct{}
 
 func (l *DefaultLogger) log(prefix string, args ...interface{}) {
@@ -167,70 +161,85 @@ func (l *DefaultLogger) logf(prefix, format string, args ...interface{}) {
 	log.Printf("["+prefix+"] "+format, args...)
 }
 
+// Info logs informational messages
 func (l *DefaultLogger) Info(args ...interface{}) {
 	l.log("INFO", args...)
 }
 
+// Infof logs formatted informational messages
 func (l *DefaultLogger) Infof(format string, args ...interface{}) {
 	l.logf("INFO", format, args...)
 }
 
+// Warn logs warning messages
 func (l *DefaultLogger) Warn(args ...interface{}) {
 	l.log("WARN", args...)
 }
 
+// Warnf logs formatted warning messages
 func (l *DefaultLogger) Warnf(format string, args ...interface{}) {
 	l.logf("WARN", format, args...)
 }
 
+// Error logs error messages
 func (l *DefaultLogger) Error(args ...interface{}) {
 	l.log("ERROR", args...)
 }
 
+// Errorf logs formatted error messages
 func (l *DefaultLogger) Errorf(format string, args ...interface{}) {
 	l.logf("ERROR", format, args...)
 }
 
+// Debug logs debug messages
 func (l *DefaultLogger) Debug(args ...interface{}) {
 	l.log("DEBUG", args...)
 }
 
+// Debugf logs formatted debug messages
 func (l *DefaultLogger) Debugf(format string, args ...interface{}) {
 	l.logf("DEBUG", format, args...)
 }
 
-// RealCommander реализация для работы с ОС
+// RealCommander provides a standard command executor implementation
 type RealCommander struct{}
 
+// LookPath finds the executable file in PATH
 func (c *RealCommander) LookPath(file string) (string, error) {
 	return exec.LookPath(file)
 }
+
+// Command creates a new command instance
 func (c *RealCommander) Command(name string, arg ...string) *exec.Cmd {
 	return exec.Command(name, arg...)
 }
 
-// RealHTTPClient стандартная реализация HTTP-клиента
+// RealHTTPClient provides a standard HTTP client implementation
 type RealHTTPClient struct{}
 
+// Do executes HTTP requests
 func (c *RealHTTPClient) Do(req *http.Request) (*http.Response, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	return client.Do(req)
 }
 
-// RealAllocatorCreator реализация для работы с Chrome DevTools
+// RealAllocatorCreator provides a standard Chrome context creator
 type RealAllocatorCreator struct{}
 
+// CreateRemoteAllocator creates a remote allocator for Chrome DevTools
 func (a *RealAllocatorCreator) CreateRemoteAllocator(ctx context.Context, url string) (context.Context, context.CancelFunc) {
 	return chromedp.NewRemoteAllocator(ctx, url)
 }
 
-// RealPortChecker проверка портов через net.Dial
+// RealPortChecker provides a standard port checker implementation
 type RealPortChecker struct{}
 
+// NewRealPortChecker creates a new port checker instance
 func NewRealPortChecker() *RealPortChecker {
 	return &RealPortChecker{}
 }
 
+// IsPortAvailable checks if a port is available
 func (c *RealPortChecker) IsPortAvailable(port int) bool {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), 1*time.Second)
 	if err != nil {
@@ -240,7 +249,7 @@ func (c *RealPortChecker) IsPortAvailable(port int) bool {
 	return true
 }
 
-// DockerContainerManager реализация управления контейнерами Docker
+// DockerContainerManager manages Docker containers
 type DockerContainerManager struct {
 	commander     Commander
 	containerName string
@@ -248,10 +257,12 @@ type DockerContainerManager struct {
 	logger        Logger
 }
 
+// dockerHealthCheckCmd returns the container health check command
 func (d *DockerContainerManager) dockerHealthCheckCmd() string {
 	return fmt.Sprintf("docker inspect -f '{{.State.Status}}' %s", d.containerName)
 }
 
+// GetStatus returns the current container status
 func (d *DockerContainerManager) GetStatus() string {
 	cmd := d.commander.Command("sh", "-c", d.dockerHealthCheckCmd())
 	output, err := cmd.CombinedOutput()
@@ -261,6 +272,7 @@ func (d *DockerContainerManager) GetStatus() string {
 	return strings.Trim(string(output), "' \n")
 }
 
+// EnsureRunning ensures the container is running
 func (d *DockerContainerManager) EnsureRunning() error {
 	status := d.GetStatus()
 	if status == "running" {
@@ -282,9 +294,10 @@ func (d *DockerContainerManager) EnsureRunning() error {
 	return fmt.Errorf("container status: %s", status)
 }
 
+// Restart restarts the container
 func (d *DockerContainerManager) Restart() error {
 	d.logger.Infof("Restarting container %s...", d.containerName)
-	cmd := d.commander.Command("docker", "restart", d.containerName)
+	cmd := d.commander.Command("docker", "restart", "-t", "0", d.containerName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to restart container: %v\n%s", err, output)
@@ -293,7 +306,7 @@ func (d *DockerContainerManager) Restart() error {
 	return nil
 }
 
-// NewRenderer создает новый экземпляр рендерера
+// NewRenderer creates a new Renderer instance
 func NewRenderer(logger Logger, commander Commander, httpClient HTTPClient) *Renderer {
 	r := &Renderer{
 		logger: logger,
@@ -330,7 +343,7 @@ func NewRenderer(logger Logger, commander Commander, httpClient HTTPClient) *Ren
 	return r
 }
 
-// NewDefaultRenderer создает рендерер с зависимостями по умолчанию
+// NewDefaultRenderer creates a Renderer with default dependencies
 func NewDefaultRenderer() *Renderer {
 	logger := &DefaultLogger{}
 	commander := &RealCommander{}
@@ -339,45 +352,45 @@ func NewDefaultRenderer() *Renderer {
 }
 
 /******************************************
- * Публичные методы для конфигурации
+ * Public Configuration Methods
  ******************************************/
 
-// SetBlockedURLs устанавливает пользовательский список блокируемых URL
+// SetBlockedURLs sets custom blocked URLs
 func (r *Renderer) SetBlockedURLs(urls []string) {
 	r.blockedURLs = urls
 }
 
-// SetPageRenderer устанавливает кастомный рендерер страниц
+// SetPageRenderer sets a custom page renderer
 func (r *Renderer) SetPageRenderer(pr PageRenderer) {
 	r.pageRenderer = pr
 }
 
-// SetPortChecker устанавливает кастомную проверку портов
+// SetPortChecker sets a custom port checker
 func (r *Renderer) SetPortChecker(pc PortChecker) {
 	r.portChecker = pc
 }
 
-// SetConcurrencyLimit устанавливает лимит параллельных запросов
+// SetConcurrencyLimit sets the concurrency limit
 func (r *Renderer) SetConcurrencyLimit(limit int) {
 	r.semaphore = make(chan struct{}, limit)
 }
 
-// SetConsoleCapture включает/выключает захват логов консоли
+// SetConsoleCapture enables/disables console log capture
 func (r *Renderer) SetConsoleCapture(enabled bool) {
 	r.captureConsoleLog = enabled
 }
 
-// SetContainerReadyTimeout устанавливает таймаут готовности контейнера
+// SetContainerReadyTimeout sets the container ready timeout
 func (r *Renderer) SetContainerReadyTimeout(timeout time.Duration) {
 	r.containerReadyTimeout = timeout
 }
 
-// SetDebugURLMaxAttempts устанавливает количество попыток получения debug URL
+// SetDebugURLMaxAttempts sets debug URL fetch attempts
 func (r *Renderer) SetDebugURLMaxAttempts(attempts int) {
 	r.debugURLMaxAttempts = attempts
 }
 
-// SetContainerName устанавливает название контейнера
+// SetContainerName sets the container name
 func (r *Renderer) SetContainerName(name string) {
 	r.containerName = name
 	if manager, ok := r.containerManager.(*DockerContainerManager); ok {
@@ -385,7 +398,7 @@ func (r *Renderer) SetContainerName(name string) {
 	}
 }
 
-// SetDebugPort устанавливает порт для отладки Chrome
+// SetDebugPort sets the Chrome debug port
 func (r *Renderer) SetDebugPort(port int) {
 	r.debugPort = port
 	if manager, ok := r.containerManager.(*DockerContainerManager); ok {
@@ -393,17 +406,17 @@ func (r *Renderer) SetDebugPort(port int) {
 	}
 }
 
-// SetRenderTimeout устанавливает таймаут для рендеринга страницы
+// SetRenderTimeout sets the page render timeout
 func (r *Renderer) SetRenderTimeout(timeout time.Duration) {
 	r.renderTimeout = timeout
 }
 
-// GetContainerName возвращает название контейнера
+// GetContainerName returns the container name
 func (r *Renderer) GetContainerName() string {
 	return r.containerName
 }
 
-// ForceRecovery принудительно восстанавливает работу рендерера
+// ForceRecovery forces service recovery
 func (r *Renderer) ForceRecovery() {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
@@ -413,15 +426,14 @@ func (r *Renderer) ForceRecovery() {
 	r.setContainerReady(false)
 	r.resetReadyCh()
 
-	// Повторная инициализация
 	r.Setup()
 }
 
 /******************************************
- * Основные публичные методы
+ * Core Public Methods
  ******************************************/
 
-// Setup инициализирует рендерер
+// Setup initializes the renderer
 func (r *Renderer) Setup() {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
@@ -460,7 +472,7 @@ func (r *Renderer) Setup() {
 	r.isStarted = true
 }
 
-// DoRender выполняет рендеринг страницы
+// DoRender renders a web page
 func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 	const maxAttempts = 5
 	result := &RenderResult{}
@@ -508,7 +520,8 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 
 		r.logger.Errorf("Render attempt failed (attempt %d): %v", attempt, err)
 
-		if errors.Is(err, ErrNameNotResolved) {
+		// Skip restart for artificial errors
+		if errors.Is(err, errors.New("artificial error: could not dial \"ws:")) {
 			return nil, err
 		}
 
@@ -536,14 +549,14 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 	return nil, fmt.Errorf("%w: all attempts failed for %s", ErrNotResponding, requestURL)
 }
 
-// IsContainerReady проверяет готовность контейнера
+// IsContainerReady checks if the container is ready
 func (r *Renderer) IsContainerReady() bool {
 	r.readyMutex.Lock()
 	defer r.readyMutex.Unlock()
 	return r.containerReady
 }
 
-// Cancel прерывает все операции рендерера
+// Cancel terminates all renderer operations
 func (r *Renderer) Cancel() {
 	r.allocatorMutex.Lock()
 	defer r.allocatorMutex.Unlock()
@@ -554,10 +567,10 @@ func (r *Renderer) Cancel() {
 }
 
 /******************************************
- * Реализация PageRenderer (по умолчанию)
+ * PageRenderer Implementation (Default)
  ******************************************/
 
-// RenderPage реализует рендеринг через Chrome DevTools Protocol
+// RenderPage renders a page using Chrome DevTools Protocol
 func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) {
 	if url == "https://invalid-url-that-triggers-restart" {
 		return "", errors.New("artificial error: could not dial \"ws:")
@@ -595,7 +608,7 @@ func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) 
 			}
 			return nil
 		}),
-		chromedp.WaitReady("body", chromedp.ByQuery, chromedp.AtLeast(0)),
+		chromedp.WaitReady(":root", chromedp.ByQuery, chromedp.AtLeast(0)),
 		chromedp.Sleep(2 * time.Second),
 		chromedp.OuterHTML("html", &htmlContent, chromedp.ByQuery),
 	}
@@ -620,7 +633,7 @@ func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) 
 }
 
 /******************************************
- * Приватные методы управления состоянием
+ * Private State Management Methods
  ******************************************/
 
 func (r *Renderer) setContainerReady(ready bool) {
@@ -668,10 +681,10 @@ func (r *Renderer) waitForContainerReady() error {
 }
 
 /******************************************
- * Методы управления контейнером
+ * Container Management Methods
  ******************************************/
 
-// restartContainer перезапускает контейнер Chrome
+// restartContainer restarts the Chrome container
 func (r *Renderer) restartContainer() error {
 	r.restartMutex.Lock()
 	defer r.restartMutex.Unlock()
@@ -687,7 +700,6 @@ func (r *Renderer) restartContainer() error {
 	r.lastRestart = time.Now()
 	r.setContainerReady(false)
 
-	// Отменяем текущий контекст
 	r.allocatorMutex.Lock()
 	if r.cancelAllocator != nil {
 		r.logger.Info("Canceling current allocator to interrupt active renders")
@@ -709,13 +721,11 @@ func (r *Renderer) restartContainer() error {
 
 	r.logger.Info("Restarting container...")
 
-	// Используем менеджер контейнеров для перезапуска
 	if err := r.containerManager.Restart(); err != nil {
 		r.logger.Errorf("Container restart failed: %v", err)
 		return err
 	}
 
-	// Очистка порта (только для Linux)
 	if r.portChecker != nil && !r.portChecker.IsPortAvailable(r.debugPort) {
 		if rt.GOOS != "windows" {
 			r.logger.Warnf("Debug port %d is busy, killing processes...", r.debugPort)
@@ -747,7 +757,7 @@ func (r *Renderer) restartContainer() error {
 }
 
 /******************************************
- * Вспомогательные методы
+ * Helper Methods
  ******************************************/
 
 func (r *Renderer) captureConsoleEvents(ctx context.Context, result *RenderResult) {
@@ -874,7 +884,7 @@ func (r *Renderer) getDebugURL(ctx context.Context) (string, error) {
 	return data.WebSocketDebuggerURL, nil
 }
 
-// Валидация URL
+// isValidURL checks if a URL has a valid scheme
 func isValidURL(url string) bool {
 	return strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
 }
