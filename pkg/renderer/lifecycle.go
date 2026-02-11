@@ -19,18 +19,27 @@ func (r *Renderer) Setup() {
 	r.setup()
 }
 
+// SetupWithRecovery initializes rendering environment and starts auto-recovery.
+// The recovery loop periodically retries setup() if the container becomes unreachable.
+func (r *Renderer) SetupWithRecovery() {
+	r.Setup()
+	r.startRecoveryLoop()
+}
+
 // setup performs initialization without locking (must be called with mutex held)
 func (r *Renderer) setup() {
-	if r.isStarted {
-		r.logger.Info("Renderer already initialized")
+	if r.isStarted && r.isContainerReady() {
+		r.logger.Info("Renderer already initialized and ready")
 		return
 	}
 
 	r.logger.Info("Initializing renderer...")
+	r.logger.Infof("Using container: %s on port %d", r.containerName, r.debugPort)
 
 	r.logger.Info("Setting up container...")
 	if err := r.containerManager.EnsureRunning(); err != nil {
-		r.logger.Errorf("Container setup error: %v", err)
+		r.logger.Errorf("Container setup failed: %v", err)
+		return
 	}
 
 	r.logger.Info("Connecting to Chrome...")
@@ -39,14 +48,56 @@ func (r *Renderer) setup() {
 		r.logger.Infof("Using Chrome debug URL: %s", wsURL)
 		r.setRemoteAllocator(wsURL)
 		r.setContainerReady(true)
+		r.isStarted = true
 		r.logger.Info("Connected to Chrome via remote allocator")
 	} else {
-		r.logger.Error("Failed to connect to Chrome container")
-		r.logger.Errorf("Connection error: %v", err)
+		r.logger.Errorf("Failed to connect to Chrome: %v", err)
 		r.setContainerReady(false)
 	}
+}
 
-	r.isStarted = true
+// startRecoveryLoop launches a background goroutine that periodically
+// retries setup() if the container is not ready. This prevents the renderer
+// from getting permanently stuck after a setup failure.
+func (r *Renderer) startRecoveryLoop() {
+	interval := r.recoveryInterval
+	if interval == 0 {
+		interval = defaultRecoveryInterval
+	}
+
+	r.recoveryStop = make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-r.recoveryStop:
+				return
+			case <-ticker.C:
+				if !r.isContainerReady() {
+					r.logger.Info("Recovery: container not ready, attempting reconnection...")
+					r.mutex.Lock()
+					r.isStarted = false
+					r.setup()
+					r.mutex.Unlock()
+					if r.isContainerReady() {
+						r.logger.Info("Recovery: successfully reconnected to Chrome")
+						atomic.StoreInt32(&r.totalRestarts, 0)
+					} else {
+						r.logger.Warn("Recovery: reconnection attempt failed, will retry")
+					}
+				}
+			}
+		}
+	}()
+}
+
+// StopRecovery terminates the background recovery loop
+func (r *Renderer) StopRecovery() {
+	if r.recoveryStop != nil {
+		close(r.recoveryStop)
+	}
 }
 
 // DoRender performs page rendering with retry logic
@@ -95,15 +146,16 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 			return nil, ErrContextCanceled
 		}
 
-		r.logger.Errorf("Render attempt failed (attempt %d): %v", attempt, err)
-
-		if errors.Is(err, errors.New("artificial error: could not dial \"ws:")) {
-			return nil, err
+		if isPageNavigationError(err) {
+			r.logger.Warnf("Target site error (attempt %d/%d): %v", attempt, maxAttempts, err)
+			return nil, fmt.Errorf("%w: %v", ErrTargetSiteError, err)
 		}
+
+		r.logger.Errorf("Render attempt failed (attempt %d/%d): %v", attempt, maxAttempts, err)
 
 		if r.shouldRestart(err) {
 			if r.requestRestart() {
-				r.logger.Warn("Initiating container restart...")
+				r.logger.Warn("Chrome infrastructure error detected, initiating container restart...")
 			}
 
 			delay := time.Duration(math.Pow(2, float64(attempt))) * time.Second
@@ -116,7 +168,7 @@ func (r *Renderer) DoRender(requestURL string) (*RenderResult, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("%w: all attempts failed for %s", ErrNotResponding, requestURL)
+	return nil, fmt.Errorf("%w: all %d attempts failed for %s", ErrNotResponding, maxAttempts, requestURL)
 }
 
 // ForceRecovery resets renderer after failure
@@ -129,6 +181,7 @@ func (r *Renderer) ForceRecovery() {
 	r.setContainerReady(false)
 	r.resetReadyCh()
 	r.isStarted = false
+	atomic.StoreInt32(&r.totalRestarts, 0)
 
 	r.setup()
 }
@@ -243,18 +296,33 @@ func (r *Renderer) waitForChromeReady() error {
 	}
 }
 
-// shouldRestart determines if an error warrants container restart
+// shouldRestart determines if an error warrants container restart.
+// Only Chrome infrastructure errors trigger restarts — NOT target site errors.
 func (r *Renderer) shouldRestart(err error) bool {
+	if isPageNavigationError(err) {
+		return false
+	}
 	return strings.Contains(err.Error(), "could not dial \"ws:") ||
 		strings.Contains(err.Error(), "exec: \"google-chrome\":") ||
-		strings.Contains(err.Error(), "net::ERR_CONNECTION_REFUSED") ||
-		strings.Contains(err.Error(), "net::ERR_NAME_NOT_RESOLVED") ||
-		strings.Contains(err.Error(), "net::ERR_CONNECTION_TIMED_OUT") ||
 		errors.Is(err, ErrInvalidContext) ||
 		errors.Is(err, ErrDOMNodeNotFound)
 }
 
-// requestRestart queues a container restart if not in cooldown
+// isPageNavigationError returns true if the error originates from the target
+// site being unreachable, as opposed to Chrome infrastructure failure.
+// These errors should NOT trigger Chrome container restarts.
+func isPageNavigationError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "page load error net::ERR_CONNECTION_REFUSED") ||
+		strings.Contains(msg, "page load error net::ERR_NAME_NOT_RESOLVED") ||
+		strings.Contains(msg, "page load error net::ERR_CONNECTION_TIMED_OUT") ||
+		strings.Contains(msg, "page load error net::ERR_CONNECTION_RESET") ||
+		strings.Contains(msg, "page load error net::ERR_TIMED_OUT") ||
+		errors.Is(err, ErrTargetSiteError)
+}
+
+// requestRestart queues a container restart if not in cooldown and
+// the total restart limit has not been reached.
 func (r *Renderer) requestRestart() bool {
 	r.restartMutex.Lock()
 	defer r.restartMutex.Unlock()
@@ -264,6 +332,15 @@ func (r *Renderer) requestRestart() bool {
 		return false
 	}
 
+	count := atomic.LoadInt32(&r.totalRestarts)
+	if count >= maxTotalRestarts {
+		r.logger.Errorf("Restart limit reached (%d/%d), disabling container until recovery",
+			count, maxTotalRestarts)
+		r.setContainerReady(false)
+		return false
+	}
+
+	atomic.AddInt32(&r.totalRestarts, 1)
 	r.setRestarting(true)
 	go func() {
 		defer r.setRestarting(false)

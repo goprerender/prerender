@@ -7,17 +7,19 @@ import (
 
 // Application error definitions
 var (
-	ErrNotResponding      = errors.New("chrome not responding")
-	ErrNameNotResolved    = errors.New("domain name not resolved")
-	ErrContainerRestart   = errors.New("container restart failed")
-	ErrTimeoutExceeded    = errors.New("render timeout exceeded")
-	ErrContainerNotReady  = errors.New("container not ready")
-	ErrContainerStartFail = errors.New("container start failed")
-	ErrContextCanceled    = errors.New("context canceled")
-	ErrInvalidContext     = errors.New("invalid context")
-	ErrPortNotAvailable   = errors.New("debug port not available")
-	ErrChromeNotReady     = errors.New("chrome not ready")
-	ErrDOMNodeNotFound    = errors.New("DOM node not found")
+	ErrNotResponding        = errors.New("chrome not responding")
+	ErrNameNotResolved      = errors.New("domain name not resolved")
+	ErrContainerRestart     = errors.New("container restart failed")
+	ErrTimeoutExceeded      = errors.New("render timeout exceeded")
+	ErrContainerNotReady    = errors.New("container not ready")
+	ErrContainerStartFail   = errors.New("container start failed")
+	ErrContextCanceled      = errors.New("context canceled")
+	ErrInvalidContext       = errors.New("invalid context")
+	ErrPortNotAvailable     = errors.New("debug port not available")
+	ErrChromeNotReady       = errors.New("chrome not ready")
+	ErrDOMNodeNotFound      = errors.New("DOM node not found")
+	ErrTargetSiteError      = errors.New("target site error")
+	ErrRestartsExhausted    = errors.New("restart attempts exhausted")
 )
 
 // Constants for operational parameters
@@ -31,4 +33,6 @@ const (
 	restartCooldown         = 30 * time.Second
 	portCheckTimeout        = 10 * time.Second
 	activeRequestsWaitLimit = 5 * time.Second
+	maxTotalRestarts        = 20
+	defaultRecoveryInterval = 60 * time.Second
 )

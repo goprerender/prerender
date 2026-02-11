@@ -91,6 +91,7 @@ func TestRendererLifecycle(t *testing.T) {
 
 	// Logger expectations
 	logger.On("Info", "Initializing renderer...").Once()
+	logger.On("Infof", "Using container: %s on port %d", "headless-shell", 9222).Once()
 	logger.On("Info", "Setting up container...").Once()
 	logger.On("Info", "Connecting to Chrome...").Once()
 	logger.On("Infof", "Using Chrome debug URL: %s", "ws://test").Once()
@@ -122,19 +123,14 @@ func TestContainerStartFailure(t *testing.T) {
 	allocatorCreator := new(AllocatorCreatorMock)
 	containerMgr := new(ContainerManagerMock)
 
-	// Logger expectations
+	// Logger expectations — setup() returns early on EnsureRunning failure
 	logger.On("Info", "Initializing renderer...").Once()
+	logger.On("Infof", "Using container: %s on port %d", "headless-shell", 9222).Once()
 	logger.On("Info", "Setting up container...").Once()
-	logger.On("Errorf", "Container setup error: %v", mock.Anything).Once()
-	logger.On("Info", "Connecting to Chrome...").Once()
-	logger.On("Error", "Failed to connect to Chrome container").Once()
-	logger.On("Errorf", "Connection error: %v", mock.Anything).Once()
+	logger.On("Errorf", "Container setup failed: %v", mock.Anything).Once()
 	logger.On("Debugf", mock.Anything, mock.Anything).Maybe()
 
 	containerMgr.On("EnsureRunning").Return(errors.New("docker not found")).Once()
-
-	// HTTP client will fail on all attempts
-	httpClient.On("Do", mock.Anything).Return((*http.Response)(nil), errors.New("connection refused")).Times(3)
 
 	r := newTestRenderer(logger, httpClient, allocatorCreator, containerMgr)
 	r.debugURLMaxAttempts = 3
@@ -155,6 +151,7 @@ func TestSuccessfulRender(t *testing.T) {
 
 	// Logger expectations
 	logger.On("Info", "Initializing renderer...").Once()
+	logger.On("Infof", "Using container: %s on port %d", "headless-shell", 9222).Once()
 	logger.On("Info", "Setting up container...").Once()
 	logger.On("Info", "Connecting to Chrome...").Once()
 	logger.On("Infof", "Using Chrome debug URL: %s", "ws://test").Once()
@@ -207,6 +204,7 @@ func TestRenderWithRestart(t *testing.T) {
 	logger.On("Error", mock.Anything).Maybe()
 	logger.On("Errorf", mock.Anything, mock.Anything).Maybe()
 	logger.On("Errorf", mock.Anything, mock.Anything, mock.Anything).Maybe()
+	logger.On("Errorf", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
 	logger.On("Debugf", mock.Anything, mock.Anything).Maybe()
 
 	// Container manager: status before restart, restart, status after restart
@@ -290,6 +288,7 @@ func TestConcurrentRendering(t *testing.T) {
 
 	logger.On("Info", mock.Anything).Maybe()
 	logger.On("Infof", mock.Anything, mock.Anything).Maybe()
+	logger.On("Infof", mock.Anything, mock.Anything, mock.Anything).Maybe()
 	logger.On("Debugf", mock.Anything, mock.Anything).Maybe()
 
 	containerMgr.On("EnsureRunning").Return(nil).Once()
@@ -336,6 +335,7 @@ func TestContextCancellation(t *testing.T) {
 
 	logger.On("Info", mock.Anything).Maybe()
 	logger.On("Infof", mock.Anything, mock.Anything).Maybe()
+	logger.On("Infof", mock.Anything, mock.Anything, mock.Anything).Maybe()
 	logger.On("Warnf", mock.Anything, mock.Anything, mock.Anything).Maybe()
 	logger.On("Debugf", mock.Anything, mock.Anything).Maybe()
 

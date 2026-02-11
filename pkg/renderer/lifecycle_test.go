@@ -21,6 +21,7 @@ func TestForceRecovery(t *testing.T) {
 	logger.On("Info", "Initiating forced recovery").Once()
 	logger.On("Info", "Canceling active requests").Once()
 	logger.On("Info", "Initializing renderer...").Once()
+	logger.On("Infof", "Using container: %s on port %d", "headless-shell", 9222).Once()
 	logger.On("Info", "Setting up container...").Once()
 	logger.On("Info", "Connecting to Chrome...").Once()
 	logger.On("Infof", "Using Chrome debug URL: %s", "ws://test").Once()
@@ -130,12 +131,20 @@ func TestShouldRestart(t *testing.T) {
 		err      error
 		expected bool
 	}{
-		{"ConnectionError", errors.New("could not dial \"ws:"), true},
-		{"ConnectionRefused", errors.New("net::ERR_CONNECTION_REFUSED"), true},
-		{"Timeout", errors.New("net::ERR_CONNECTION_TIMED_OUT"), true},
-		{"NameNotResolved", errors.New("net::ERR_NAME_NOT_RESOLVED"), true},
+		// Chrome infrastructure errors → SHOULD restart
+		{"WebSocketDialError", errors.New("could not dial \"ws:"), true},
+		{"ChromeNotFound", errors.New("exec: \"google-chrome\": not found"), true},
 		{"InvalidContext", ErrInvalidContext, true},
 		{"DOMNodeNotFound", ErrDOMNodeNotFound, true},
+
+		// Page navigation errors → should NOT restart Chrome
+		{"PageConnectionRefused", errors.New("page load error net::ERR_CONNECTION_REFUSED"), false},
+		{"PageTimeout", errors.New("page load error net::ERR_CONNECTION_TIMED_OUT"), false},
+		{"PageNameNotResolved", errors.New("page load error net::ERR_NAME_NOT_RESOLVED"), false},
+		{"PageConnectionReset", errors.New("page load error net::ERR_CONNECTION_RESET"), false},
+		{"TargetSiteError", ErrTargetSiteError, false},
+
+		// Other errors → should NOT restart
 		{"OtherError", errors.New("random error"), false},
 		{"TimeoutExceeded", ErrTimeoutExceeded, false},
 	}
@@ -144,6 +153,29 @@ func TestShouldRestart(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			result := r.shouldRestart(tc.err)
 			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+func TestIsPageNavigationError(t *testing.T) {
+	testCases := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{"PageConnectionRefused", errors.New("page load error net::ERR_CONNECTION_REFUSED"), true},
+		{"PageTimeout", errors.New("page load error net::ERR_CONNECTION_TIMED_OUT"), true},
+		{"PageNameNotResolved", errors.New("page load error net::ERR_NAME_NOT_RESOLVED"), true},
+		{"PageConnectionReset", errors.New("page load error net::ERR_CONNECTION_RESET"), true},
+		{"PageTimedOut", errors.New("page load error net::ERR_TIMED_OUT"), true},
+		{"BareConnectionRefused", errors.New("net::ERR_CONNECTION_REFUSED"), false},
+		{"ChromeDialError", errors.New("could not dial \"ws:"), false},
+		{"RandomError", errors.New("something else"), false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expected, isPageNavigationError(tc.err))
 		})
 	}
 }

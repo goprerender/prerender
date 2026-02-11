@@ -45,6 +45,10 @@ type Renderer struct {
 	containerName         string
 	debugPort             int
 	renderTimeout         time.Duration
+
+	totalRestarts    int32
+	recoveryStop     chan struct{}
+	recoveryInterval time.Duration
 }
 
 // NewRenderer creates a new renderer instance
