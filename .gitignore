@@ -89,3 +89,14 @@ fabric.properties
 cmd/text
 workflow/output
 workflow/console_logs.txt
+
+# Build artifacts
+bin/
+*-linux
+gops_config.yaml
+
+# Development workflow
+workflow/deepseek_replay.md
+
+# Claude Code (private)
+.claude/

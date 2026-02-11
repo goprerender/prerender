@@ -2,11 +2,13 @@ package rstorage
 
 import (
 	"context"
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	"github.com/goprerender/prerender/internal/cachers"
 	"github.com/goprerender/prerender/pkg/api/storage"
 	"github.com/goprerender/prerender/pkg/log"
-	"google.golang.org/protobuf/ptypes"
-	"time"
 )
 
 type server struct {
@@ -20,7 +22,7 @@ func New(gw storage.StorageClient, logger log.Logger) cachers.Сacher {
 
 func (s server) Put(key string, data []byte) error {
 	ctx := context.Background()
-	now, _ := ptypes.TimestampProto(time.Now())
+	now := timestamppb.New(time.Now())
 	req := storage.StoreRequest{Api: "v1", Page: &storage.Page{
 		Hash:      key,
 		Data:      data,

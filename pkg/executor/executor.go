@@ -29,7 +29,7 @@ func (e *Executor) GetPC() cachers.Сacher {
 }
 
 func (e *Executor) Execute(query string, force bool) (string, error) {
-	var res string
+	var res *renderer.RenderResult
 
 	hostPath, err := url.SlashRemover(query, e.logger)
 	if err != nil {
@@ -48,18 +48,18 @@ func (e *Executor) Execute(query string, force bool) (string, error) {
 		}*/
 		res, err = e.renderer.DoRender(query)
 		if err != nil {
-			return res, err
+			return res.HTML, err
 		}
 
 		//e.logger.Infof("html: %s", res)
 
-		htmlGzip := archive.GzipHtml(res, hostPath, "", e.logger)
+		htmlGzip, _ := archive.GzipHtml(res.HTML, hostPath, "", e.logger)
 		err = e.pc.Put(key, htmlGzip)
 		if err != nil {
 			e.logger.Warn("Can't store result in cache")
 		}
 	} else {
-		res = archive.UnzipHtml(value, e.logger)
+		res.HTML, _ = archive.UnzipHtml(value, e.logger)
 	}
-	return res, nil
+	return res.HTML, nil
 }

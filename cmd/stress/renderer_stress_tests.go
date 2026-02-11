@@ -121,14 +121,8 @@ func createContainer(port int) error {
 		"--name", containerName,
 		"--memory=4g", "--cpus=4", "--shm-size=2g",
 		"chromedp/headless-shell:latest",
-		"--disable-software-rasterizer",
-		"--disable-gpu",
-		"--disable-dev-shm-usage",
-		"--no-zygote",
-		"--single-process",
-		"--disable-setuid-sandbox",
-		"--no-sandbox",
-		"--health-start-period=10s",
+		// Только один параметр порта:
+		"--remote-debugging-address=0.0.0.0",
 	)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to create container: %v\n%s", err, output)
@@ -257,9 +251,9 @@ func main() {
 	r.SetDebugPort(actualPort)
 	r.SetPortChecker(renderer.NewRealPortChecker())
 	r.SetConsoleCapture(true)
-	r.SetContainerReadyTimeout(120 * time.Second)
-	r.SetDebugURLMaxAttempts(15)
-	r.SetConcurrencyLimit(5)
+	r.SetContainerReadyTimeout(120 * time.Second) // Увеличено до 120 секунд
+	r.SetDebugURLMaxAttempts(20)                  // Увеличено количество попыток
+	r.SetConcurrencyLimit(10)
 	r.SetRenderTimeout(renderTimeout)
 
 	log.Println("Starting renderer stress test...")
@@ -277,10 +271,10 @@ func main() {
 	log.Println("Waiting for renderer to be ready...")
 	start := time.Now()
 	for !r.IsContainerReady() {
-		if time.Since(start) > 120*time.Second {
+		if time.Since(start) > 120*time.Second { // Увеличено до 120 секунд
 			log.Fatal("Renderer failed to become ready within 120 seconds")
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(1 * time.Second) // Увеличен интервал проверки
 	}
 	log.Println("Renderer is ready")
 
@@ -308,19 +302,23 @@ func main() {
 	log.Println("\n=== Concurrent rendering test ===")
 	startConcurrent := time.Now()
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, 10)
+
 	for i := 0; i < concurrentRequests; i++ {
 		if ctx.Err() != nil {
 			break
 		}
 
+		sem <- struct{}{}
 		wg.Add(1)
+
 		go func(i int) {
 			defer wg.Done()
+			defer func() { <-sem }()
+
 			url := testURLs[rand.Intn(len(testURLs))]
 			renderPage(ctx, r, url, i)
 		}(i)
-
-		time.Sleep(500 * time.Millisecond)
 	}
 	wg.Wait()
 	conDuration := time.Since(startConcurrent)
@@ -357,7 +355,7 @@ func main() {
 			successes++
 		}
 
-		delay := time.Duration(500+rand.Intn(1500)) * time.Millisecond
+		delay := time.Duration(200+rand.Intn(800)) * time.Millisecond
 		time.Sleep(delay)
 	}
 
@@ -431,7 +429,7 @@ func testContainerRestart(ctx context.Context, r *renderer.Renderer, logger *Rea
 
 	log.Println("Waiting for container to restart...")
 	startWait := time.Now()
-	timeout := 30 * time.Second
+	timeout := 15 * time.Second
 	for {
 		currentStartTime := getContainerStartTime(r)
 		if currentStartTime != startTimeBefore {
@@ -462,7 +460,7 @@ func getContainerStartTime(r *renderer.Renderer) string {
 	cmd := exec.Command("docker", "inspect", "-f", "{{.State.StartedAt}}", r.GetContainerName())
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "unknown"
+		return fmt.Sprintf("error: %v", err)
 	}
 	return strings.TrimSpace(string(output))
 }

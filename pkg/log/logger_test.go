@@ -11,7 +11,7 @@ import (
 )
 
 func TestNew(t *testing.T) {
-	assert.NotNil(t, New())
+	assert.NotNil(t, New(false))
 }
 
 func TestNewWithZap(t *testing.T) {
@@ -47,7 +47,7 @@ func Test_getRequestID(t *testing.T) {
 }
 
 func Test_logger_With(t *testing.T) {
-	l := New()
+	l := New(false)
 	l2 := l.With(nil)
 	assert.True(t, reflect.DeepEqual(l2, l))
 
