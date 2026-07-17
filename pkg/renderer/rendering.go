@@ -44,7 +44,15 @@ func (r *Renderer) RenderPage(url string, result *RenderResult) (string, error) 
 
 	tasks := chromedp.Tasks{
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			return network.SetBlockedURLs(r.blockedURLs).Do(ctx)
+			patterns := make([]*network.BlockPattern, len(r.blockedURLs))
+			for i, url := range r.blockedURLs {
+				pattern := url
+				if !strings.Contains(url, "://") {
+					pattern = "*://*." + url + "/*"
+				}
+				patterns[i] = &network.BlockPattern{URLPattern: pattern, Block: true}
+			}
+			return network.SetBlockedURLs().WithURLPatterns(patterns).Do(ctx)
 		}),
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			return network.SetExtraHTTPHeaders(network.Headers{"X-Prerender": "1"}).Do(ctx)
